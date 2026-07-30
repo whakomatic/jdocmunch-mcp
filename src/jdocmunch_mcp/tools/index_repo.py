@@ -13,7 +13,7 @@ from ..security import is_secret_file
 from ..storage import DocStore
 from ..storage.doc_store import format_repo_at_sha, normalize_commit_sha
 from ..summarizer import summarize_sections
-from ..embeddings import embed_sections, get_provider_name, should_embed
+from ..embeddings import embed_sections, should_embed
 from ._constants import SKIP_PATTERNS
 
 
@@ -435,7 +435,10 @@ async def index_repo(
                 "changed": len(changed), "new": len(new), "deleted": len(deleted),
                 "section_count": len(updated.sections) if updated else 0,
                 "indexed_at": updated.indexed_at if updated else "",
-                "semantic_search": use_embeddings and get_provider_name() is not None,
+                # Derived from the saved index, never asserted from intent — the
+                # same predicate search_sections gates hybrid retrieval on, so
+                # the flag cannot claim a channel with no data behind it.
+                "semantic_search": bool(updated and updated._has_embeddings()),
                 "source_dirty": False,
                 "sha_certified": sha_certified,
                 "_meta": {"latency_ms": latency_ms},
@@ -499,7 +502,8 @@ async def index_repo(
             "section_count": len(all_sections),
             "doc_types": doc_types,
             "files": parsed_files[:20],
-            "semantic_search": use_embeddings and get_provider_name() is not None,
+            # Derived from the saved index, not from intent — see above.
+            "semantic_search": bool(saved and saved._has_embeddings()),
             "source_dirty": False,
             "sha_certified": sha_certified,
             "_meta": {"latency_ms": latency_ms},

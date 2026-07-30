@@ -41,8 +41,23 @@ def clean_env(monkeypatch):
     for var in _CLOUD_ENV:
         monkeypatch.delenv(var, raising=False)
     provider._WARNED_SUPPRESSED_PAID_EMBED.clear()
+    provider._WARNED_MISSING_PACKAGE.clear()
     yield monkeypatch
     provider._WARNED_SUPPRESSED_PAID_EMBED.clear()
+    provider._WARNED_MISSING_PACKAGE.clear()
+
+
+@pytest.fixture
+def packages_installed(monkeypatch):
+    """Pretend every provider's backing package is importable.
+
+    These tests are about the PAID-CLOUD GATE, not installation. Under the
+    package-availability guard (a name is only returned when it can embed), a
+    selected-but-uninstalled provider resolves to None for its own reason,
+    which would shadow the gate decision under test — and the dev env installs
+    none of the cloud SDKs.
+    """
+    monkeypatch.setattr(provider, "_provider_package_available", lambda name: True)
 
 
 @pytest.fixture
@@ -66,7 +81,7 @@ def test_bare_cloud_key_does_not_auto_select(clean_env, no_local, env_var, name)
 
 
 @pytest.mark.parametrize("env_var,name", [("OPENAI_API_KEY", "openai"), ("GOOGLE_API_KEY", "gemini")])
-def test_explicit_opt_in_restores_the_provider(clean_env, no_local, env_var, name):
+def test_explicit_opt_in_restores_the_provider(clean_env, no_local, packages_installed, env_var, name):
     """The guard must be an opt-in, not a removal. Non-vacuity for the test above:
     if this fails, the provider is simply broken rather than gated."""
     clean_env.setenv(env_var, "sk-not-a-real-key")
@@ -75,7 +90,7 @@ def test_explicit_opt_in_restores_the_provider(clean_env, no_local, env_var, nam
 
 
 @pytest.mark.parametrize("name", ["openai", "gemini"])
-def test_naming_the_provider_is_always_honored(clean_env, no_local, name):
+def test_naming_the_provider_is_always_honored(clean_env, no_local, packages_installed, name):
     """Explicit is a deliberate choice and bypasses the guard, matching the
     summarizer's contract. Without this the guard would break real users who
     configured a cloud embedder on purpose."""
@@ -85,7 +100,7 @@ def test_naming_the_provider_is_always_honored(clean_env, no_local, name):
     assert provider.get_provider_name() == name
 
 
-def test_should_embed_auto_follows_the_guard(clean_env, no_local):
+def test_should_embed_auto_follows_the_guard(clean_env, no_local, packages_installed):
     """`use_embeddings="auto"` is index_local's DEFAULT, so this is the path the
     incident actually took. Guarding get_provider_name is only a fix because
     should_embed('auto') is defined in terms of it."""
@@ -114,7 +129,7 @@ def test_suppression_is_logged_not_silent(clean_env, no_local, caplog):
     )
 
 
-def test_openai_compatible_is_not_gated(clean_env, no_local):
+def test_openai_compatible_is_not_gated(clean_env, no_local, packages_installed):
     """openai-compatible requires an explicitly configured URL + model, which is
     itself the opt-in, and the common target is a local runtime. Gating it would
     punish the offline-friendly option."""

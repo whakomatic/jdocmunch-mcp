@@ -28,7 +28,7 @@ from ..security import (
 from ..storage import DocStore
 from ..storage.doc_store import normalize_commit_sha
 from ..summarizer import summarize_sections
-from ..embeddings import embed_sections, get_provider_name, should_embed
+from ..embeddings import embed_sections, should_embed
 from ._git import local_git_head, local_git_paths_dirty, local_git_paths_tracked, stable_local_git_state
 from ._constants import SKIP_PATTERNS
 
@@ -2169,7 +2169,13 @@ def index_local(
                 "changed": len(changed), "new": len(new), "deleted": len(deleted),
                 "section_count": len(updated.sections) if updated else 0,
                 "indexed_at": updated.indexed_at if updated else "",
-                "semantic_search": use_embeddings and get_provider_name() is not None,
+                # Derived from the saved index, never asserted from intent: this
+                # is the same predicate search_sections gates hybrid retrieval
+                # on, so the flag cannot claim a channel the index has no data
+                # for. Intent (`use_embeddings` + a provider name) was the old
+                # source and reported true over zero vectors whenever embedding
+                # was configured but could not run.
+                "semantic_search": bool(updated and updated._has_embeddings()),
                 "_meta": {"latency_ms": latency_ms},
             }
             result.update(derivation_fields)
@@ -2322,7 +2328,9 @@ def index_local(
             "section_count": len(all_sections),
             "doc_types": doc_types,
             "files": parsed_files[:20],
-            "semantic_search": use_embeddings and get_provider_name() is not None,
+            # Derived from the saved index, not from intent — see the
+            # incremental path above.
+            "semantic_search": bool(saved and saved._has_embeddings()),
             "_meta": {"latency_ms": latency_ms},
         }
         result.update(derivation_fields)

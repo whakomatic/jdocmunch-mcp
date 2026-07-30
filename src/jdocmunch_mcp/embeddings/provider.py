@@ -15,12 +15,19 @@ JDOCMUNCH_ALLOW_PAID_EMBEDDINGS is set. A bare key in the environment must not
 silently bill, and must not silently send the indexed corpus to a third party.
 Naming the provider in step 1 is always honored.
 
+⚠ Honored, but not invented: a named provider whose package is not installed
+resolves to no provider at all, with a warning. `get_provider_name()` returning
+a name means embedding can actually run, which is what its callers assume when
+they report semantic search as available.
+
 Set JDOCMUNCH_EMBEDDING_PROVIDER=none to disable all embedding.
 """
 
+import importlib.util
 import logging
 import math
 import os
+import sys
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -130,6 +137,65 @@ _EMBED_AUTO_DETECT_ORDER = (
 )
 
 
+# Backing package per provider, as (import name, install name). A provider whose
+# package is absent CANNOT embed: `_get_provider` swallows the ImportError its
+# factory raises and returns None, `embed_sections` then returns its sections
+# untouched, and callers that ask `get_provider_name() is not None` report
+# semantic search as enabled over an index holding zero vectors. Naming a
+# provider is a deliberate choice, but it cannot conjure the package, so the
+# name is honored only when the package is actually importable.
+_PROVIDER_PACKAGES = {
+    "gemini": ("google.generativeai", "google-generativeai"),
+    "openai": ("openai", "openai"),
+    "openai-compatible": ("openai", "openai"),
+    "sentence-transformers": ("sentence_transformers", "sentence-transformers"),
+}
+_WARNED_MISSING_PACKAGE: set = set()
+
+
+def _provider_package_available(name: str) -> bool:
+    """Whether the named provider's backing package is importable."""
+    if name == "sentence-transformers":
+        return _sentence_transformers_available()
+    package = _PROVIDER_PACKAGES.get(name)
+    if not package:
+        return False
+    # An entry in sys.modules IS importable, whatever find_spec thinks of it —
+    # tests inject bare ModuleType fakes there, and find_spec raises ValueError
+    # on a module whose __spec__ is None instead of finding it.
+    if package[0] in sys.modules:
+        return sys.modules[package[0]] is not None
+    try:
+        return importlib.util.find_spec(package[0]) is not None
+    except (ImportError, ValueError):
+        # A namespace-package parent that is itself absent raises rather than
+        # returning None. Absent is absent either way.
+        return False
+
+
+def _usable_provider(name: str) -> Optional[str]:
+    """Return ``name`` when it can actually embed, else None with one warning.
+
+    Reporting no provider is the honest answer for a provider that cannot run:
+    the alternative is a name that every caller reads as "semantic search is on"
+    while nothing embeds. Indexing still succeeds, lexically.
+    """
+    if _provider_package_available(name):
+        return name
+    if name not in _WARNED_MISSING_PACKAGE:
+        _WARNED_MISSING_PACKAGE.add(name)
+        import_name, install_name = _PROVIDER_PACKAGES.get(name, (name, name))
+        logger.warning(
+            "Embedding provider %s was selected but its package (%s) is not "
+            "importable here — treating embeddings as DISABLED rather than "
+            "claiming a provider that cannot embed. Install %s to enable it, or "
+            "set JDOCMUNCH_EMBEDDING_PROVIDER=none to silence this. Indexing "
+            "continues with lexical BM25 search.",
+            name, import_name, install_name,
+        )
+    return None
+
+
 def _paid_embeddings_allowed() -> bool:
     """Whether the user explicitly opted in to paid-cloud auto-embedding.
 
@@ -149,20 +215,25 @@ def get_provider_name() -> Optional[str]:
     Auto-detect NEVER selects a paid cloud provider from a bare env key unless
     JDOCMUNCH_ALLOW_PAID_EMBEDDINGS is set. Naming the provider explicitly
     bypasses this, because that is a deliberate choice rather than an ambient one.
+
+    Every returned name is one whose backing package is importable. A name is a
+    promise that embedding can run, and callers spend it that way — reporting
+    semantic search as enabled, skipping the lexical-only disclosure. Naming an
+    uninstalled provider therefore yields None, not the name.
     """
     explicit = os.environ.get("JDOCMUNCH_EMBEDDING_PROVIDER", "").lower().strip()
     if explicit == "gemini":
-        return "gemini"
+        return _usable_provider("gemini")
     if explicit == "openai":
-        return "openai"
+        return _usable_provider("openai")
     if explicit == "openai-compatible":
         # Not in the paid set: it requires an explicitly configured URL + model,
         # which is itself the opt-in, and the common target is a local runtime.
         if _openai_compat_url() and _openai_compat_model():
-            return "openai-compatible"
+            return _usable_provider("openai-compatible")
         return None
     if explicit in ("sentence-transformers", "sentence_transformers", "local"):
-        return "sentence-transformers"
+        return _usable_provider("sentence-transformers")
     if explicit == "none":
         return None
     # Auto-detect: cloud providers first, then offline fallback.
@@ -182,7 +253,11 @@ def get_provider_name() -> Optional[str]:
                     env_var, name, name,
                 )
             continue
-        return name
+        usable = _usable_provider(name)
+        if usable:
+            return usable
+        # Package absent: fall through to the next candidate rather than
+        # abandoning auto-detect, so a second configured key still wins.
     if _sentence_transformers_available():
         return "sentence-transformers"
     return None

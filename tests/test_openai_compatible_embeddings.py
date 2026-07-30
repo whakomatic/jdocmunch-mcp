@@ -25,6 +25,11 @@ def _clear_embedding_env(monkeypatch):
         monkeypatch.delenv(key, raising=False)
     emb_provider._reset_provider_cache()
     emb_provider._reset_query_cache()
+    # This file tests config resolution and cache identity, never installation.
+    # Mock the package-availability guard so a named provider resolves whether
+    # or not the dev env installs the openai SDK; the guard has its own tests
+    # in test_embedding_provider_honesty.py.
+    monkeypatch.setattr(emb_provider, "_provider_package_available", lambda name: True)
 
 
 def _install_fake_openai(monkeypatch):

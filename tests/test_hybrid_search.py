@@ -65,6 +65,10 @@ def test_should_embed_false():
 
 
 def test_should_embed_auto_with_provider(monkeypatch):
+    # Package availability is mocked: a named provider only resolves when its
+    # backing package is importable, and the dev env installs no cloud SDKs.
+    from jdocmunch_mcp.embeddings import provider as emb_provider
+    monkeypatch.setattr(emb_provider, "_provider_package_available", lambda name: True)
     monkeypatch.setenv("JDOCMUNCH_EMBEDDING_PROVIDER", "gemini")
     monkeypatch.setenv("GOOGLE_API_KEY", "dummy")
     assert should_embed("auto") is True
