@@ -231,6 +231,9 @@ ALLOWED_ROOT_FILES = frozenset({
     # Packaging + metadata
     "PKG-INFO", "pyproject.toml", "server.json", "LICENSE",
     ".gitignore", "SECURITY.md", "CONTRIBUTING.md",
+    # `* text=auto eol=lf`: what keeps checkouts and the sdist byte-identical
+    # across platforms. It belongs in the distribution, not scratch.
+    ".gitattributes",
     # Documentation shipped to users
     "README.md", "CHANGELOG.md", "USER_GUIDE.md", "ARCHITECTURE.md",
     "ROADMAP.md", "SPEC.md", "TOKEN_SAVINGS.md",
