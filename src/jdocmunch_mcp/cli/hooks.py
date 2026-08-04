@@ -39,6 +39,27 @@ _DOC_EXTENSIONS: set[str] = {
     ".tscn", ".tres",
 }
 
+# Extensions the Read hint fires on: prose only, a strict subset of
+# _DOC_EXTENSIONS. The indexer admits more than this, but admitting a file is
+# not the same as it having sections worth searching. The data formats are
+# excluded deliberately:
+#   .json/.yaml/.yml  parser admits these only when a content sniff confirms
+#                     OpenAPI; a plain package.json or CI config falls through
+#                     to a degenerate parse, so "prefer search_sections" is
+#                     wrong advice for it.
+#   .xml/.svg/.xhtml  the xml parser builds a node tree, not prose sections.
+#                     An icon asset has no text to retrieve at all.
+#   .tscn/.tres       Godot scene/resource data.
+# Reindexing still covers the full _DOC_EXTENSIONS set; only the hint narrows.
+_HINT_EXTENSIONS: set[str] = {
+    ".md", ".markdown", ".mdx",
+    ".txt",
+    ".rst",
+    ".adoc", ".asciidoc", ".asc",
+    ".ipynb",
+    ".html", ".htm",
+}
+
 # Minimum file size (bytes) to trigger the jDocMunch suggestion.
 # Override with JDOCMUNCH_HOOK_MIN_SIZE env var.
 _MIN_SIZE_BYTES = int(os.environ.get("JDOCMUNCH_HOOK_MIN_SIZE", "2048"))
@@ -212,7 +233,10 @@ def run_pretooluse() -> int:
     size threshold, prints a stderr hint directing Claude to use
     jDocMunch tools instead.
 
-    Small files, non-doc files, and unreadable paths are silently allowed.
+    Small files, non-prose files, and unreadable paths are silently allowed.
+    Gated on _HINT_EXTENSIONS, not _DOC_EXTENSIONS: the data formats the
+    indexer accepts (.json, .yaml, .xml, .svg, .tscn) have no sections to
+    search, so pointing Read at search_sections for them is wrong advice.
 
     Returns exit code (always 0 -- errors are swallowed to avoid blocking).
     """
@@ -226,7 +250,7 @@ def run_pretooluse() -> int:
         return 0
 
     _, ext = os.path.splitext(file_path)
-    if ext.lower() not in _DOC_EXTENSIONS:
+    if ext.lower() not in _HINT_EXTENSIONS:
         return 0
 
     try:
