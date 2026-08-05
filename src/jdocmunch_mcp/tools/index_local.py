@@ -4,6 +4,7 @@ import hashlib
 import os
 import re
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -1137,6 +1138,43 @@ def _count_skip(skip_counts: Optional[dict], reason: str) -> None:
         skip_counts[reason] = skip_counts.get(reason, 0) + 1
 
 
+def _build_changes_list(
+    new: list,
+    changed: list,
+    deleted: list,
+    mtimes_by_relpath: dict,
+) -> list:
+    """Build the per-file change set for the index_local response.
+
+    Returns one entry per affected file:
+      {"doc_path": str, "status": "new"|"changed"|"deleted",
+       "mtime": iso8601-str | None}
+
+    Sorted by mtime descending; entries without mtime (deletes, or
+    missing-mtime defensive case) come last; tie-break on doc_path
+    ascending for determinism.
+    """
+    entries: list = []
+    for dp in new:
+        mt = mtimes_by_relpath.get(dp)
+        iso = datetime.fromtimestamp(mt).isoformat() if mt is not None else None
+        entries.append({"doc_path": dp, "status": "new", "mtime": iso})
+    for dp in changed:
+        mt = mtimes_by_relpath.get(dp)
+        iso = datetime.fromtimestamp(mt).isoformat() if mt is not None else None
+        entries.append({"doc_path": dp, "status": "changed", "mtime": iso})
+    for dp in deleted:
+        entries.append({"doc_path": dp, "status": "deleted", "mtime": None})
+
+    dated = [e for e in entries if e["mtime"] is not None]
+    undated = [e for e in entries if e["mtime"] is None]
+    # Two-pass stable sort for descending primary, ascending tie-break.
+    dated.sort(key=lambda e: e["doc_path"])
+    dated.sort(key=lambda e: e["mtime"], reverse=True)
+    undated.sort(key=lambda e: e["doc_path"])
+    return dated + undated
+
+
 def discover_doc_files(
     folder_path: Path,
     max_files: int = 10_000,
@@ -1153,7 +1191,9 @@ def discover_doc_files(
     at the existing skip sites — the index-time half of the coverage contract
     an absent verdict discloses. Omitted = no counting, behavior unchanged.
 
-    Returns ``(files, warnings, discovered_count)``. ``files`` is capped at
+    Returns ``(files, warnings, discovered_count, mtimes_by_path)``.
+    ``mtimes_by_path`` maps each returned ``Path`` to its POSIX mtime float
+    (raw, not formatted). ``files`` is capped at
     ``max_files``; ``discovered_count`` is the total that matched all filters
     (capped at ``max_files * _DISCOVERY_HARD_CEILING_MULT`` so a pathological
     directory tree cannot run forever). When ``discovered_count > max_files``
@@ -1267,8 +1307,10 @@ def discover_doc_files(
         # Only sort on the truncation path; the un-truncated case
         # preserves walk order so callers see no behavior change.
         discovered_items.sort(key=lambda item: item[1], reverse=True)
-    files = [fp for fp, _ in discovered_items[:max_files]]
-    return files, warnings, discovered
+    kept = discovered_items[:max_files]
+    files = [fp for fp, _ in kept]
+    mtimes = {fp: mt for fp, mt in kept}
+    return files, warnings, discovered, mtimes
 
 
 def _resolve_explicit_paths(
@@ -1285,12 +1327,13 @@ def _resolve_explicit_paths(
       * a directory (recursed via ``discover_doc_files`` against that subtree),
       * a file (validated and added when its extension is known).
 
-    Returns ``(files, warnings, requested)``. ``requested`` is the list of
-    root-relative POSIX paths for every entry that resolved inside
-    ``folder_path`` — including entries that no longer exist on disk — so the
-    caller can scope an incremental diff to exactly what was asked for
-    (jdoc#31). Mirrors ``discover_doc_files`` semantics for security: rejects
-    symlink escapes, path-traversal attempts, and entries outside
+    Returns ``(files, warnings, requested, mtimes_by_path)``. ``requested`` is
+    the list of root-relative POSIX paths for every entry that resolved
+    inside ``folder_path`` — including entries that no longer exist on disk —
+    so the caller can scope an incremental diff to exactly what was asked for
+    (jdoc#31). ``mtimes_by_path`` maps each returned ``Path`` to its POSIX
+    mtime float. Mirrors ``discover_doc_files`` semantics for security:
+    rejects symlink escapes, path-traversal attempts, and entries outside
     ``folder_path``. Skips entries with unknown extensions silently (caller
     gets a `warnings` entry per skip).
     """
@@ -1298,6 +1341,7 @@ def _resolve_explicit_paths(
     warnings: list = []
     requested: list = []
     seen: set = set()
+    abs_mtimes: dict = {}
 
     for raw in paths:
         if not isinstance(raw, str) or not raw.strip():
@@ -1323,12 +1367,13 @@ def _resolve_explicit_paths(
             continue
 
         if p.is_dir():
-            sub_files, sub_warnings, _sub_discovered = discover_doc_files(
+            sub_files, sub_warnings, _sub_discovered, sub_mtimes = discover_doc_files(
                 p,
                 max_files=max_files - len(files),
                 follow_symlinks=follow_symlinks,
             )
             warnings.extend(sub_warnings)
+            abs_mtimes.update(sub_mtimes)
             for f in sub_files:
                 fr = f.resolve()
                 if fr not in seen:
@@ -1361,13 +1406,17 @@ def _resolve_explicit_paths(
             if pr not in seen:
                 seen.add(pr)
                 files.append(p)
+                try:
+                    abs_mtimes[p.resolve()] = p.stat().st_mtime
+                except OSError:
+                    pass
         else:
             warnings.append(f"Skipped non-file/non-dir entry: {raw!r}")
 
         if len(files) >= max_files:
             break
 
-    return files[:max_files], warnings, requested
+    return files[:max_files], warnings, requested, abs_mtimes
 
 
 def index_local(
@@ -1444,7 +1493,17 @@ def index_local(
             retires anything.
 
     Returns:
-        Dict with indexing results.
+        Dict with indexing results. Includes a `changes` list with one
+        entry per affected file:
+
+            {"doc_path": str,
+             "status": "new" | "changed" | "deleted",
+             "mtime": ISO8601 string | None}
+
+        Sorted by mtime descending; deleted entries (mtime=None) sort
+        last; tie-break on doc_path ascending. On a full-index pass
+        every parsed file appears with status="new". On a no-change
+        incremental pass `changes` is `[]`.
     """
     t0 = time.perf_counter()
     folder_path = Path(path).expanduser().resolve()
@@ -1497,7 +1556,7 @@ def index_local(
         # explicit `paths`) records it; a subset call is not a coverage claim.
         walk_skip_counts: dict = {}
         if paths:
-            doc_files, discover_warnings, requested_rels = _resolve_explicit_paths(
+            doc_files, discover_warnings, requested_rels, abs_mtimes = _resolve_explicit_paths(
                 folder_path,
                 list(paths),
                 max_files=max_files,
@@ -1505,7 +1564,7 @@ def index_local(
             )
             discovered_count = len(doc_files)
         else:
-            doc_files, discover_warnings, discovered_count = discover_doc_files(
+            doc_files, discover_warnings, discovered_count, abs_mtimes = discover_doc_files(
                 folder_path,
                 max_files=max_files,
                 extra_ignore_patterns=extra_ignore_patterns,
@@ -1977,6 +2036,19 @@ def index_local(
                 repo_id = f"{owner}/{repo_name}"
                 existing_index = store.load_index(owner, repo_name)
 
+        # Convert absolute-Path-keyed mtimes (from discover_doc_files /
+        # _resolve_explicit_paths) to rel-path-keyed (matching
+        # current_files / index.file_hashes).
+        mtimes_by_relpath: dict = {}
+        for fp in doc_files:
+            try:
+                rel = fp.relative_to(folder_path).as_posix()
+            except ValueError:
+                continue
+            mt = abs_mtimes.get(fp)
+            if mt is not None:
+                mtimes_by_relpath[rel] = mt
+
         # Read all discovered files
         current_files: dict = {}
         for file_path in doc_files:
@@ -2105,6 +2177,7 @@ def index_local(
                     "folder_path": str(folder_path),
                     "incremental": True,
                     "changed": 0, "new": 0, "deleted": 0,
+                    "changes": [],
                     "_meta": {"latency_ms": latency_ms},
                 }
                 nochange_result.update(derivation_fields)
@@ -2160,6 +2233,12 @@ def index_local(
                 **selection_kwargs,
             )
 
+            incremental_changes = _build_changes_list(
+                new=list(new),
+                changed=list(changed),
+                deleted=list(deleted),
+                mtimes_by_relpath=mtimes_by_relpath,
+            )
             latency_ms = int((time.perf_counter() - t0) * 1000)
             result = {
                 "success": True,
@@ -2176,6 +2255,7 @@ def index_local(
                 # source and reported true over zero vectors whenever embedding
                 # was configured but could not run.
                 "semantic_search": bool(updated and updated._has_embeddings()),
+                "changes": incremental_changes,
                 "_meta": {"latency_ms": latency_ms},
             }
             result.update(derivation_fields)
@@ -2318,6 +2398,13 @@ def index_local(
             except Exception:
                 autotune_result = None
 
+        full_changes = _build_changes_list(
+            new=list(parsed_files),
+            changed=[],
+            deleted=[],
+            mtimes_by_relpath=mtimes_by_relpath,
+        )
+
         latency_ms = int((time.perf_counter() - t0) * 1000)
         result = {
             "success": True,
@@ -2331,6 +2418,7 @@ def index_local(
             # Derived from the saved index, not from intent — see the
             # incremental path above.
             "semantic_search": bool(saved and saved._has_embeddings()),
+            "changes": full_changes,
             "_meta": {"latency_ms": latency_ms},
         }
         result.update(derivation_fields)

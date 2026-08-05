@@ -28,14 +28,14 @@ def _seed_md_files(root: Path, n: int) -> None:
 
 def test_discover_returns_discovered_count_when_under_cap(tmp_path):
     _seed_md_files(tmp_path, 5)
-    files, warnings, discovered = discover_doc_files(tmp_path, max_files=100)
+    files, warnings, discovered, _ = discover_doc_files(tmp_path, max_files=100)
     assert len(files) == 5
     assert discovered == 5
 
 
 def test_discover_returns_full_discovered_count_when_over_cap(tmp_path):
     _seed_md_files(tmp_path, 50)
-    files, warnings, discovered = discover_doc_files(tmp_path, max_files=10)
+    files, warnings, discovered, _ = discover_doc_files(tmp_path, max_files=10)
     assert len(files) == 10
     assert discovered == 50  # NOT clamped to 10 — jdoc#15 fix
 
@@ -101,7 +101,7 @@ def test_discover_hard_ceiling_caps_walks_across_directories(tmp_path):
         sub = tmp_path / f"sub_{d:03d}"
         sub.mkdir()
         _seed_md_files(sub, 10)  # 1000 files total
-    _, _, discovered = discover_doc_files(tmp_path, max_files=10)
+    _, _, discovered, _ = discover_doc_files(tmp_path, max_files=10)
     # Ceiling = 10 * 20 = 200. Allow one extra dir's worth of overshoot.
     assert discovered <= 200 + 10
     assert discovered >= 200

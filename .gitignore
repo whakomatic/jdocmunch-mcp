@@ -1,3 +1,9 @@
+# Secrets - dotenv files
+.env
+.env.local
+.env.*.local
+!.env.example
+
 # Python
 __pycache__/
 *.py[cod]
