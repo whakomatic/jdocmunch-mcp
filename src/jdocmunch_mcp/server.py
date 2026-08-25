@@ -3163,6 +3163,16 @@ def main(argv: Optional[list] = None):
     )
     hook_reindex_parser.add_argument("file", help="Path to the edited doc file to reindex")
 
+    # --- reap-indexes ---
+    reap_parser = subparsers.add_parser(
+        "reap-indexes",
+        help="Remove indexes whose source corpus is provably gone (dry run unless --apply)",
+    )
+    reap_parser.add_argument(
+        "--apply", action="store_true",
+        help="Actually delete. Without it the pass only reports what it would remove.",
+    )
+
     # --- watch (jdoc#78) ---
     watch_parser = subparsers.add_parser(
         "watch",
@@ -3311,6 +3321,21 @@ def main(argv: Optional[list] = None):
     if args.command == "hook-reindex":
         from .cli.hooks import run_hook_reindex
         sys.exit(run_hook_reindex(args.file))
+
+    if args.command == "reap-indexes":
+        from .tools.reap_indexes import reap_indexes
+        result = reap_indexes(apply=args.apply)
+        for entry in result["reaped"]:
+            verb = "reaped" if result["applied"] else "would reap"
+            print(f"{verb} {entry['repo']}  <- {entry['source_root']} ({entry['reason']})")
+        for entry in result["findings"]:
+            print(f"kept {entry['repo']}  <- {entry['source_root']} ({entry['finding']})")
+        for entry in result["failed"]:
+            print(f"FAILED {entry['repo']}: {entry['error']}", file=sys.stderr)
+        print(f"{result['reaped_count']} index(es) "
+              f"{'removed' if result['applied'] else 'would be removed'}"
+              f"{'' if result['applied'] else '; re-run with --apply'}")
+        sys.exit(1 if result["failed"] else 0)
 
     if args.command == "watch":
         from .watch import watch_docs
