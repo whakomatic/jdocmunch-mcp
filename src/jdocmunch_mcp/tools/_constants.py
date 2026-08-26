@@ -8,6 +8,11 @@ SKIP_PATTERNS = [
     "node_modules/", "vendor/", "venv/", ".venv/", "__pycache__/",
     "dist/", "build/", ".git/", ".tox/", ".mypy_cache/",
     ".gradle/", "target/",
+    # Owner ruling 2026-08-25: `.claude/` is agent and editor configuration, not
+    # documentation, so it is not corpus. The per-file hook refuses it too
+    # (tools/index_file.py); the two entry points have to agree, or a full
+    # reindex deletes exactly what the next edit puts back.
+    ".claude/",
 ]
 
 # Dotted directories are skipped by RULE, not by enumeration (jdoc#113).
@@ -50,3 +55,15 @@ def is_skipped_dot_dir(name: str, include_dot_dirs=None) -> bool:
     if include_dot_dirs and name in set(include_dot_dirs):
         return False
     return True
+
+def should_skip(rel_path: str) -> bool:
+    """True when a root-relative path lies under a directory that is not corpus.
+
+    Lives here rather than in the walk because BOTH entry points have to answer
+    this identically. The walk prunes on it; the per-file hook refuses on it
+    (tools/index_file.py, Rule 3). When only the walk consulted it, a full
+    reindex deleted the rows the next edit put straight back, which is how 13
+    `.claude/**` rows outlived every reindex across four indexes.
+    """
+    normalized = "/" + rel_path.replace("\\", "/")
+    return any(("/" + pat) in normalized for pat in SKIP_PATTERNS)

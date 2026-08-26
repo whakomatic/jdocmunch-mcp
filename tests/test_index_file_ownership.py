@@ -130,6 +130,56 @@ class TestRule1Containment:
         assert match[2] == "page.md"
 
 
+class TestRule3DotClaudeRefusal:
+    """`.claude/` is configuration, not corpus (owner ruling 2026-08-25).
+
+    The walk skips it via SKIP_PATTERNS, so the hook must refuse it or the two
+    entry points disagree: a full reindex deletes the row and the next edit puts
+    it back, which is what left 13 such rows across four indexes. Not implied by
+    containment, exactly as Rule 2 is not: for a REPO-rooted index the file is
+    genuinely inside `source_root`.
+    """
+
+    def test_dot_claude_file_is_refused_by_a_repo_rooted_index(self, tmp_path):
+        repo = tmp_path / "mod"
+        (repo / "docs").mkdir(parents=True)
+        (repo / "docs" / "guide.md").write_text("# Guide", encoding="utf-8")
+        store_path = tmp_path / "store"
+        assert _index(repo, store_path, "mod")["success"] is True
+
+        settings = repo / ".claude" / "settings.json"
+        settings.parent.mkdir(parents=True)
+        settings.write_text("{}", encoding="utf-8")
+
+        assert _find_owning_index(settings, DocStore(base_path=str(store_path))) is None
+
+    def test_a_nested_dot_claude_file_is_refused_too(self, tmp_path):
+        repo = tmp_path / "mod"
+        (repo / "docs").mkdir(parents=True)
+        (repo / "docs" / "guide.md").write_text("# Guide", encoding="utf-8")
+        store_path = tmp_path / "store"
+        assert _index(repo, store_path, "mod")["success"] is True
+
+        agent = repo / ".claude" / "agents" / "reviewer" / "AGENT.md"
+        agent.parent.mkdir(parents=True)
+        agent.write_text("# Reviewer", encoding="utf-8")
+
+        assert _find_owning_index(agent, DocStore(base_path=str(store_path))) is None
+
+    def test_an_ordinary_file_under_the_same_root_still_resolves(self, tmp_path):
+        """The refusal must be the dot-directory, not the repo-rooted index."""
+        repo = tmp_path / "mod"
+        (repo / "docs").mkdir(parents=True)
+        doc = repo / "docs" / "guide.md"
+        doc.write_text("# Guide", encoding="utf-8")
+        store_path = tmp_path / "store"
+        assert _index(repo, store_path, "mod")["success"] is True
+
+        match = _find_owning_index(doc, DocStore(base_path=str(store_path)))
+        assert match is not None
+        assert match[2] == "docs/guide.md"
+
+
 class TestRule2WorktreeRefusal:
     def test_worktree_file_is_refused_by_the_parent_index(self, tmp_path):
         """An edit inside a linked worktree adds nothing to any index.

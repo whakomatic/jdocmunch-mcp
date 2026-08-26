@@ -15,6 +15,7 @@ from ..storage import DocStore
 from ..storage.doc_store import normalize_commit_sha
 from ..summarizer import summarize_sections
 from ..embeddings import embed_sections
+from ._constants import should_skip
 from ._embedding_coverage import attach_embedding_coverage as _attach_embedding_coverage
 from ._git import (
     linked_worktree_between,
@@ -82,6 +83,15 @@ def _find_owning_index(
             continue
         if linked_worktree_between(root, file_path) is not None:
             continue  # RULE 2: the parent's index does not own worktree content
+        if should_skip(file_path.relative_to(root).as_posix()):
+            # RULE 3: not corpus. Derived from the walk's own skip list rather
+            # than restated, because the two entry points disagreeing is the
+            # whole defect: the walk deletes the row on a full reindex and the
+            # next edit puts it straight back, which is how 13 `.claude/**` rows
+            # outlived every reindex across four indexes. An index rooted INSIDE
+            # such a directory still owns its own files, because the relative
+            # path is then computed from that root and no longer contains it.
+            continue
         depth = len(root.parts)
         if depth > best_depth:
             owner, _, bare = str(row.get("repo", "")).partition("/")
