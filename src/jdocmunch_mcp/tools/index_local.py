@@ -40,7 +40,7 @@ from ._git import (
     local_git_paths_tracked,
     stable_local_git_state,
 )
-from ._constants import SKIP_PATTERNS, is_skipped_dot_dir
+from ._constants import SKIP_PATTERNS, is_skipped_dot_dir, should_skip as _should_skip
 
 
 def _default_local_name(folder_name: str, folder_path: Optional[str] = None) -> str:
@@ -1123,14 +1123,6 @@ def _resolve_graduation(
         },
         "disclosure": None,
     }
-
-
-def _should_skip(rel_path: str) -> bool:
-    normalized = "/" + rel_path.replace("\\", "/")
-    for pat in SKIP_PATTERNS:
-        if ("/" + pat) in normalized:
-            return True
-    return False
 
 
 def _sidecar_view(sections: list, content_for=None) -> list:
@@ -2646,6 +2638,11 @@ def index_local(
                 new_sections = embed_sections(
                     new_sections,
                     owner=owner, name=repo_name, storage_path=storage_path,
+                    # The changed files only, never the whole corpus: without
+                    # this the cache rewrite deletes every untouched file's
+                    # vectors on every incremental reindex. (Upstream spells
+                    # the same switch `prune`, inverted; False here = merge.)
+                    prune=False,
                 )
 
             updated = store.incremental_save(
