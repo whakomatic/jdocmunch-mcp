@@ -60,7 +60,7 @@ def test_incremental_pass_keeps_the_vectors_of_untouched_sections(stub_provider,
     provider_mod.embed_sections(
         [_section("hash-a")],
         owner="local", name="idx", storage_path=str(tmp_path),
-        corpus_complete=False,
+        prune=False,
     )
     assert _cached_hashes(tmp_path) == {"hash-a#pv1", "hash-b#pv1"}
 
@@ -71,10 +71,12 @@ def test_a_full_pass_still_prunes_a_section_that_is_gone(stub_provider, tmp_path
     provider_mod.embed_sections(
         [_section("hash-a"), _section("hash-b")],
         owner="local", name="idx", storage_path=str(tmp_path),
+        prune=True,
     )
     provider_mod.embed_sections(
         [_section("hash-a")],
         owner="local", name="idx", storage_path=str(tmp_path),
+        prune=True,
     )
     assert _cached_hashes(tmp_path) == {"hash-a#pv1"}
 
@@ -95,7 +97,7 @@ def test_an_incremental_pass_after_a_provider_change_still_discards(tmp_path, mo
     provider_mod.embed_sections(
         [_section("hash-a")],
         owner="local", name="idx", storage_path=str(tmp_path),
-        corpus_complete=False,
+        prune=False,
     )
     assert _cached_hashes(tmp_path) == {"hash-a#pv1"}
 
@@ -107,5 +109,5 @@ def test_a_cache_hit_is_not_re_embedded(stub_provider, tmp_path):
                                 storage_path=str(tmp_path))
     calls_after_first = stub_provider.calls
     provider_mod.embed_sections([_section("hash-a")], owner="local", name="idx",
-                                storage_path=str(tmp_path), corpus_complete=False)
+                                storage_path=str(tmp_path), prune=False)
     assert stub_provider.calls == calls_after_first
