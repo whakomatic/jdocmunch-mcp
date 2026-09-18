@@ -407,6 +407,10 @@ class TestProviderWiring:
     def _clean(self, monkeypatch):
         prov._reset_provider_cache()
         monkeypatch.setenv("JDOCMUNCH_EMBEDDING_PROVIDER", "sentence-transformers")
+        # A named provider resolves only when its package is importable, and
+        # CI does not install sentence-transformers. These tests are about the
+        # probe and worker wiring, not installation.
+        monkeypatch.setattr(prov, "_provider_package_available", lambda name: True)
         yield
         prov._reset_provider_cache()
 

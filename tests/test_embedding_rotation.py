@@ -232,13 +232,11 @@ def _sidecar_header(store, owner="local", name="rot"):
 def _use_model(monkeypatch, model, dim):
     """Point every identity surface at one (model, dim) pair."""
     from jdocmunch_mcp.embeddings import provider as prov
-    from jdocmunch_mcp.tools import index_local as il
 
     p = _FakeProvider(dim)
     monkeypatch.setattr(prov, "_get_provider", lambda: p)
     monkeypatch.setattr(prov, "get_provider_name", lambda: "sentence-transformers")
     monkeypatch.setattr(prov, "_provider_identity", lambda n: (model, dim))
-    monkeypatch.setattr(il, "get_provider_name", lambda: "sentence-transformers")
     return p
 
 

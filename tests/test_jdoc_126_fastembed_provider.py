@@ -35,26 +35,38 @@ def _clean_env(monkeypatch):
     prov._reset_provider_cache()
 
 
+@pytest.fixture
+def packages_installed(monkeypatch):
+    """Pretend every provider's backing package is importable.
+
+    A named provider resolves only when its package is importable, and CI
+    installs neither offline provider nor any cloud SDK. The tests using this
+    are about name resolution, not installation; the package check has its
+    own tests in test_embedding_provider_honesty.py.
+    """
+    monkeypatch.setattr(prov, "_provider_package_available", lambda name: True)
+
+
 # ---------------------------------------------------------------------------
 # The reported defect: the name never reached the factory map
 # ---------------------------------------------------------------------------
 
 class TestProviderNameResolves:
-    def test_explicit_fastembed_is_recognised(self, monkeypatch):
+    def test_explicit_fastembed_is_recognised(self, monkeypatch, packages_installed):
         monkeypatch.setenv("JDOCMUNCH_EMBEDDING_PROVIDER", "fastembed")
         assert prov.get_provider_name() == "fastembed"
 
     @pytest.mark.parametrize(
         "spelling", ["fastembed", "FastEmbed", " fast-embed ", "ONNX"]
     )
-    def test_accepted_spellings(self, monkeypatch, spelling):
+    def test_accepted_spellings(self, monkeypatch, packages_installed, spelling):
         monkeypatch.setenv("JDOCMUNCH_EMBEDDING_PROVIDER", spelling)
         assert prov.get_provider_name() == "fastembed"
 
     def test_name_has_a_factory(self):
         assert "fastembed" in prov._PROVIDER_FACTORIES
 
-    def test_every_resolvable_name_has_a_factory(self, monkeypatch):
+    def test_every_resolvable_name_has_a_factory(self, monkeypatch, packages_installed):
         """A closed if-chain and a factory map are two lists that must agree.
         This is the guard the reported defect needed and did not have."""
         for spelling in ("gemini", "openai", "fastembed", "sentence-transformers"):
@@ -103,7 +115,7 @@ class TestAutoDetectPrecedence:
         monkeypatch.setattr(prov, "_sentence_transformers_available", lambda: False)
         assert prov.get_provider_name() is None
 
-    def test_fastembed_does_not_preempt_a_named_cloud_provider(self, monkeypatch):
+    def test_fastembed_does_not_preempt_a_named_cloud_provider(self, monkeypatch, packages_installed):
         monkeypatch.setattr(prov, "_fastembed_available", lambda: True)
         monkeypatch.setenv("JDOCMUNCH_EMBEDDING_PROVIDER", "gemini")
         assert prov.get_provider_name() == "gemini"
@@ -261,7 +273,7 @@ class TestWriterAndReaderAgree:
 # ---------------------------------------------------------------------------
 
 class TestNoSentenceTransformersMachinery:
-    def test_import_probe_is_not_run_for_fastembed(self, monkeypatch):
+    def test_import_probe_is_not_run_for_fastembed(self, monkeypatch, packages_installed):
         """On a machine where sentence-transformers is broken, probing it
         would suppress a provider that works fine."""
         monkeypatch.setenv("JDOCMUNCH_EMBEDDING_PROVIDER", "fastembed")

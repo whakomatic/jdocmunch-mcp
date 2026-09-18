@@ -30,8 +30,9 @@ from ..security import (
 from ..storage import DocStore
 from ..storage.doc_store import INDEX_OWNED_SIDECAR_SUFFIXES, normalize_commit_sha
 from ..summarizer import summarize_sections
-from ..embeddings import embed_sections, get_provider_name, should_embed
+from ..embeddings import embed_sections, should_embed
 from ._embedding_coverage import attach_embedding_coverage as _attach_embedding_coverage
+from ._embedding_coverage import saved_index_has_embeddings as _saved_index_has_embeddings
 from ._git import (
     is_linked_worktree,
     local_git_head,
@@ -2585,7 +2586,9 @@ def index_local(
                     # this and the incremental ones did not, so a caller could
                     # not tell "embeddings are fine" from "embeddings were
                     # never touched". Absence is not a status.
-                    "semantic_search": bool(use_embeddings) and get_provider_name() is not None,
+                    # Derived from the saved index, never from configuration;
+                    # see saved_index_has_embeddings.
+                    "semantic_search": _saved_index_has_embeddings(store, owner, repo_name),
                     "changed": 0, "new": 0, "deleted": 0,
                     **_changes_fields([]),
                     "_meta": {"latency_ms": latency_ms},
@@ -2709,7 +2712,9 @@ def index_local(
                 "changed": len(changed), "new": len(new), "deleted": len(deleted),
                 "section_count": len(updated.sections) if updated else 0,
                 "indexed_at": updated.indexed_at if updated else "",
-                "semantic_search": use_embeddings and get_provider_name() is not None,
+                # Derived from the saved index, never from configuration;
+                # see saved_index_has_embeddings.
+                "semantic_search": _saved_index_has_embeddings(store, owner, repo_name),
                 **_changes_fields(incremental_changes),
                 "_meta": {"latency_ms": latency_ms},
             }
@@ -2875,7 +2880,11 @@ def index_local(
             "section_count": len(all_sections),
             "doc_types": doc_types,
             "files": parsed_files[:20],
-            "semantic_search": use_embeddings and get_provider_name() is not None,
+            # Derived from the saved index, never from configuration: the old
+            # source (`use_embeddings` and a provider name) reported true over
+            # zero vectors whenever embedding was configured but could not
+            # run. See saved_index_has_embeddings.
+            "semantic_search": _saved_index_has_embeddings(store, owner, repo_name),
             **_changes_fields(full_changes),
             "_meta": {"latency_ms": latency_ms},
         }
