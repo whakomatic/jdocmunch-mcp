@@ -13,8 +13,9 @@ from ..security import is_secret_file
 from ..storage import DocStore
 from ..storage.doc_store import format_repo_at_sha, normalize_commit_sha
 from ..summarizer import summarize_sections
-from ..embeddings import embed_sections, get_provider_name, should_embed
+from ..embeddings import embed_sections, should_embed
 from ._embedding_coverage import attach_embedding_coverage as _attach_embedding_coverage
+from ._embedding_coverage import saved_index_has_embeddings as _saved_index_has_embeddings
 from ._constants import SKIP_PATTERNS, is_skipped_dot_dir
 
 
@@ -500,7 +501,9 @@ async def index_repo(
                 **changes_fields(build_changes_list(new, changed, deleted, repo_mtimes)),
                 "section_count": len(updated.sections) if updated else 0,
                 "indexed_at": updated.indexed_at if updated else "",
-                "semantic_search": use_embeddings and get_provider_name() is not None,
+                # Derived from the saved index, never from configuration;
+                # see saved_index_has_embeddings.
+                "semantic_search": _saved_index_has_embeddings(store, owner, index_name),
                 "source_dirty": False,
                 "sha_certified": sha_certified,
                 "_meta": {"latency_ms": latency_ms},
@@ -580,7 +583,9 @@ async def index_repo(
             **changes_fields(
                 build_changes_list(sorted(raw_files), [], [], full_repo_mtimes)
             ),
-            "semantic_search": use_embeddings and get_provider_name() is not None,
+            # Derived from the saved index, never from configuration;
+            # see saved_index_has_embeddings.
+            "semantic_search": _saved_index_has_embeddings(store, owner, index_name),
             "source_dirty": False,
             "sha_certified": sha_certified,
             "_meta": {"latency_ms": latency_ms},

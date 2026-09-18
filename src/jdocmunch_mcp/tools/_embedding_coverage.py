@@ -25,6 +25,20 @@ from typing import Optional
 COVERAGE_WARN_BELOW = 0.5
 
 
+def saved_index_has_embeddings(store, owner: str, name: str) -> bool:
+    """Whether ``search_sections`` will find vectors for this index.
+
+    The indexing tools report ``semantic_search`` from this, not from the
+    embedding configuration: a provider can be configured and still embed
+    nothing. It reads the index the way ``search_sections`` does
+    (``load_index`` then ``_has_embeddings``), because the object an
+    incremental save returns has its vectors stripped and no sidecar pointer,
+    so it reads as empty on a deletion-only refresh.
+    """
+    saved = store.load_index(owner, name)
+    return bool(saved and saved._has_embeddings())
+
+
 def attach_embedding_coverage(
     result: dict,
     *,
