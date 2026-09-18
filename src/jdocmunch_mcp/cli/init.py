@@ -72,7 +72,7 @@ def _enforcement_hooks() -> dict[str, list]:
     exe = _hook_invocation()
     return {
         "PreToolUse": [{
-            "matcher": "Read",
+            "matcher": "Read|Grep|Bash",
             "hooks": [{"type": "command", "command": f"{exe} hook-pretooluse"}],
         }],
         "PostToolUse": [{
@@ -647,7 +647,7 @@ def run_init(
     if not do_hooks and interactive:
         print()
         do_hooks = _prompt_yn(
-            "Install enforcement hooks (intercept Read on large doc files, auto-reindex after Edit/Write)?",
+            "Install enforcement hooks (hint on Read, Grep and Bash reads of large doc files, auto-reindex after Edit/Write)?",
             default=True,
         )
     elif not do_hooks and yes:

@@ -3141,7 +3141,7 @@ def main(argv: Optional[list] = None):
     # --- hook-pretooluse ---
     subparsers.add_parser(
         "hook-pretooluse",
-        help="PreToolUse hook: intercept Read on large doc files (reads stdin)",
+        help="PreToolUse hook: hint on Read, Grep and Bash reads of large doc files (reads stdin)",
     )
 
     # --- hook-posttooluse ---
