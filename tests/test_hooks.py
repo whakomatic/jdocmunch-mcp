@@ -290,6 +290,148 @@ class TestInstallHooks:
         assert json.loads(bak.read_text()) == {"existing": True}
 
 
+class TestConvergeInstalledHooks:
+    """Running init on an existing install updates the installed matcher and command."""
+
+    EXE = "C:/tools/Scripts/jdocmunch-mcp.EXE"
+
+    def _install(self, tmp_path, existing, exe=EXE, dry_run=False):
+        from jdocmunch_mcp.cli.init import install_hooks
+        settings = tmp_path / "settings.json"
+        settings.write_text(json.dumps(existing))
+        with (
+            mock.patch("jdocmunch_mcp.cli.init._settings_json_path", return_value=settings),
+            mock.patch("jdocmunch_mcp.cli.init._hook_invocation", return_value=exe),
+        ):
+            msg = install_hooks(dry_run=dry_run, backup=False)
+        return msg, json.loads(settings.read_text())
+
+    def _shipped(self, event, exe=EXE):
+        from jdocmunch_mcp.cli.init import _enforcement_hooks
+        with mock.patch("jdocmunch_mcp.cli.init._hook_invocation", return_value=exe):
+            return _enforcement_hooks()[event][0]
+
+    def _full_install(self, exe=EXE):
+        from jdocmunch_mcp.cli.init import _enforcement_hooks
+        with mock.patch("jdocmunch_mcp.cli.init._hook_invocation", return_value=exe):
+            return {"hooks": _enforcement_hooks()}
+
+    def test_stale_matcher_converges_to_shipped(self, tmp_path):
+        existing = self._full_install()
+        existing["hooks"]["PreToolUse"][0]["matcher"] = "StaleMatcher"
+        msg, data = self._install(tmp_path, existing)
+        rules = data["hooks"]["PreToolUse"]
+        assert len(rules) == 1
+        assert rules[0]["matcher"] == self._shipped("PreToolUse")["matcher"]
+        assert "updated PreToolUse" in msg
+
+    def test_rule_shared_with_a_user_hook_keeps_its_matcher(self, tmp_path):
+        existing = self._full_install()
+        existing["hooks"]["PreToolUse"][0]["matcher"] = "StaleMatcher"
+        existing["hooks"]["PreToolUse"][0]["hooks"].append(
+            {"type": "command", "command": "python my_own_hook.py"})
+        msg, data = self._install(tmp_path, existing)
+        rules = data["hooks"]["PreToolUse"]
+        assert len(rules) == 1
+        assert rules[0]["matcher"] == "StaleMatcher"
+        assert "python my_own_hook.py" in [h["command"] for h in rules[0]["hooks"]]
+
+    @pytest.mark.parametrize("user_command", [
+        "jdocmunch-mcp index-local --path .",
+        "cd ~/src/jdocmunch-mcp && ./log.sh",
+    ])
+    def test_user_jdocmunch_command_in_rule_keeps_matcher(self, tmp_path, user_command):
+        """A user hook that runs another jdocmunch-mcp subcommand, or only has
+        the name in an argument, keeps the rule's matcher."""
+        existing = self._full_install()
+        existing["hooks"]["PreToolUse"][0]["matcher"] = "StaleMatcher"
+        existing["hooks"]["PreToolUse"][0]["hooks"].append(
+            {"type": "command", "command": user_command})
+        msg, data = self._install(tmp_path, existing)
+        assert data["hooks"]["PreToolUse"][0]["matcher"] == "StaleMatcher"
+
+    def test_second_rule_for_our_hook_is_left_alone(self, tmp_path):
+        """A second rule for the same subcommand is left unchanged, so no
+        duplicate rule is written."""
+        existing = self._full_install()
+        first = existing["hooks"]["PreToolUse"][0]
+        first["matcher"] = "StaleMatcher"
+        second = {"matcher": "UserMatcher", "hooks": [dict(first["hooks"][0])]}
+        existing["hooks"]["PreToolUse"].append(second)
+        msg, data = self._install(tmp_path, existing)
+        rules = data["hooks"]["PreToolUse"]
+        assert rules[0]["matcher"] == self._shipped("PreToolUse")["matcher"]
+        assert rules[1] == second
+        assert "updated PreToolUse" in msg
+
+    def test_existing_installed_path_is_kept(self, tmp_path):
+        """An installed path that exists is kept when init runs from another
+        environment."""
+        installed = tmp_path / "bin" / "jdocmunch-mcp.EXE"
+        installed.parent.mkdir()
+        installed.write_text("")
+        existing = self._full_install(exe=installed.as_posix())
+        msg, data = self._install(tmp_path, existing, exe="C:/venv/Scripts/jdocmunch-mcp.EXE")
+        assert data == existing
+        assert "already present" in msg
+
+    def test_missing_installed_path_converges_to_shipped_path(self, tmp_path):
+        existing = self._full_install(exe=(tmp_path / "gone" / "jdocmunch-mcp.EXE").as_posix())
+        msg, data = self._install(tmp_path, existing)
+        cmd = data["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        assert cmd == self._shipped("PreToolUse")["hooks"][0]["command"]
+        assert "updated" in msg
+
+    def test_bare_name_command_converges_to_shipped_path(self, tmp_path):
+        existing = self._full_install(exe="jdocmunch-mcp")
+        msg, data = self._install(tmp_path, existing)
+        for event in ("PreToolUse", "PostToolUse", "PreCompact", "SessionStart"):
+            rules = data["hooks"][event]
+            assert len(rules) == 1, event
+            assert rules[0]["hooks"][0]["command"] == self._shipped(event)["hooks"][0]["command"]
+        assert "updated" in msg
+
+    def test_bare_name_fallback_never_replaces_an_installed_path(self, tmp_path):
+        """The bare-name fallback from _hook_invocation never replaces an
+        installed path (#39)."""
+        existing = self._full_install()
+        msg, data = self._install(tmp_path, existing, exe="jdocmunch-mcp")
+        assert data == existing
+        assert "already present" in msg
+
+    def test_quoted_exe_path_is_recognised(self, tmp_path):
+        exe = '"C:/Program Files/Python/Scripts/jdocmunch-mcp.EXE"'
+        existing = self._full_install(exe=exe)
+        existing["hooks"]["PreToolUse"][0]["matcher"] = "StaleMatcher"
+        msg, data = self._install(tmp_path, existing, exe=exe)
+        rules = data["hooks"]["PreToolUse"]
+        assert len(rules) == 1
+        assert rules[0]["matcher"] == self._shipped("PreToolUse", exe=exe)["matcher"]
+        assert rules[0]["hooks"][0]["command"] == f"{exe} hook-pretooluse"
+
+    def test_other_servers_rules_are_untouched(self, tmp_path):
+        jcm = {"matcher": "Read|Grep|Glob|Bash",
+               "hooks": [{"type": "command", "command": "jcodemunch-mcp hook-pretooluse"}]}
+        existing = self._full_install()
+        existing["hooks"]["PreToolUse"].insert(0, json.loads(json.dumps(jcm)))
+        existing["hooks"]["PreToolUse"][1]["matcher"] = "StaleMatcher"
+        msg, data = self._install(tmp_path, existing)
+        assert data["hooks"]["PreToolUse"][0] == jcm
+
+    def test_current_install_reports_already_present(self, tmp_path):
+        existing = self._full_install()
+        msg, data = self._install(tmp_path, existing)
+        assert data == existing
+        assert "already present" in msg
+
+    def test_dry_run_reports_update_and_writes_nothing(self, tmp_path):
+        existing = self._full_install()
+        existing["hooks"]["PreToolUse"][0]["matcher"] = "StaleMatcher"
+        msg, data = self._install(tmp_path, existing, dry_run=True)
+        assert data == existing
+        assert "would update PreToolUse" in msg
+
+
 # ---------------------------------------------------------------------------
 # CLI dispatch (server.py main)
 # ---------------------------------------------------------------------------

@@ -3,6 +3,7 @@
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -362,31 +363,125 @@ def _settings_json_path() -> Path:
     return Path.home() / ".claude" / "settings.json"
 
 
+# Executable (quoted if it contains spaces), then the first argument.
+_HOOK_COMMAND_RE = re.compile(r'^\s*("[^"]*"|\S+)\s+(\S+)')
+_JDOC_EXE_RE = re.compile(r"jdocmunch[-_]mcp(?:\.exe)?", re.IGNORECASE)
+
+
+def _jdoc_hook_parts(cmd: str) -> tuple[str, str] | None:
+    """Split a hook command into ``(executable, subcommand)`` if it runs jdocmunch-mcp.
+
+    Accepts a bare name, an absolute path, a ``.exe`` suffix and a quoted path.
+    Returns None for any other command, including one that only has the name
+    in an argument.
+    """
+    m = _HOOK_COMMAND_RE.match(cmd)
+    if not m:
+        return None
+    exe = m.group(1).strip('"')
+    if not _JDOC_EXE_RE.fullmatch(re.split(r"[/\\]", exe)[-1]):
+        return None
+    return exe, m.group(2)
+
+
+def _jdoc_subcommand(cmd: str) -> str | None:
+    """Return the jdocmunch-mcp subcommand a hook command runs, or None."""
+    parts = _jdoc_hook_parts(cmd)
+    return parts[1] if parts else None
+
+
+def _rule_subs(rule: dict) -> set[str]:
+    """Return the jdocmunch-mcp subcommands run by the hooks in a settings rule."""
+    return {s for h in rule.get("hooks", []) if (s := _jdoc_subcommand(h.get("command", "")))}
+
+
+def _is_path(exe: str) -> bool:
+    """True if ``exe`` contains a path separator."""
+    return bool(re.search(r"[/\\]", exe))
+
+
+def _exe_needs_replacing(exe: str) -> bool:
+    """True if an installed hook executable should be replaced by the shipped path.
+
+    That is a bare name, which the hook shell's PATH may not find (#39), or a
+    path that no longer exists. An existing path is kept, so running init from
+    a venv or with uvx does not point the hooks at that environment.
+    """
+    return not _is_path(exe) or not Path(exe).exists()
+
+
+def _converge_rule(existing_rules: list, shipped_rule: dict, hook_subs: set[str]) -> bool:
+    """Update the installed rule for ``shipped_rule``'s subcommand to the shipped values.
+
+    Based on jcodemunch-mcp's ``_converge_rule``. Without it, ``_merge_hooks``
+    skips a rule whose command is already installed, so the matcher and
+    command stay as the first init wrote them.
+
+    Only the first rule that runs the subcommand is updated; a later one was
+    added by the user. The matcher is replaced only if every hook in the rule
+    runs a subcommand in ``hook_subs``, so a user hook in the same rule keeps
+    its trigger. A command is replaced only if the shipped executable is a path
+    and ``_exe_needs_replacing`` is true for the installed one.
+
+    Returns True if anything changed.
+    """
+    shipped = {
+        parts[1]: (h["command"], parts[0])
+        for h in shipped_rule["hooks"]
+        if (parts := _jdoc_hook_parts(h["command"]))
+    }
+    old_rule = next((r for r in existing_rules if _rule_subs(r) & shipped.keys()), None)
+    if old_rule is None:
+        return False
+    changed = False
+    all_jdoc = all(_jdoc_subcommand(h.get("command", "")) in hook_subs for h in old_rule.get("hooks", []))
+    if all_jdoc and old_rule.get("matcher", "") != shipped_rule["matcher"]:
+        old_rule["matcher"] = shipped_rule["matcher"]
+        changed = True
+    for h in old_rule.get("hooks", []):
+        parts = _jdoc_hook_parts(h.get("command", ""))
+        if not parts or parts[1] not in shipped:
+            continue
+        shipped_cmd, shipped_exe = shipped[parts[1]]
+        if h["command"] != shipped_cmd and _is_path(shipped_exe) and _exe_needs_replacing(parts[0]):
+            h["command"] = shipped_cmd
+            changed = True
+    return changed
+
+
 def _merge_hooks(
     data: dict[str, Any],
     hook_defs: dict[str, list],
     marker: str,
-) -> list[str]:
-    """Merge hook definitions into settings data, returning names of added events.
+) -> tuple[list[str], list[str]]:
+    """Merge hook definitions into settings data.
 
-    ``marker`` is a substring used to detect whether our hook is already
-    installed (e.g. ``"jdocmunch-mcp hook-p"``).
-
-    Each rule is checked individually: if a rule's command already exists
-    in the event's hook list, it is skipped.
+    Returns ``(added, updated)``: events that gained a rule, and events whose
+    installed rule was updated by ``_converge_rule``. A rule whose subcommand
+    is already installed for the event is updated in place, not added again.
+    ``marker`` is a substring fallback for commands ``_jdoc_hook_parts`` does
+    not recognise.
     """
     hooks = data.setdefault("hooks", {})
     added: list[str] = []
+    updated: list[str] = []
+    hook_subs = {s for rules in hook_defs.values() for r in rules for s in _rule_subs(r)}
 
     for event_name, event_hooks in hook_defs.items():
         existing_cmds: set[str] = set()
+        existing_subs: set[str] = set()
         if event_name in hooks:
             for rule in hooks[event_name]:
                 for h in rule.get("hooks", []):
                     existing_cmds.add(h.get("command", ""))
+                existing_subs |= _rule_subs(rule)
 
         new_rules = []
+        rule_updated = False
         for rule in event_hooks:
+            if _rule_subs(rule) & existing_subs:
+                rule_updated |= _converge_rule(hooks[event_name], rule, hook_subs)
+                continue
             rule_cmds = [h.get("command", "") for h in rule.get("hooks", [])]
             if any(cmd in existing_cmds for cmd in rule_cmds if cmd):
                 continue
@@ -401,8 +496,10 @@ def _merge_hooks(
             else:
                 hooks[event_name] = new_rules
             added.append(event_name)
+        elif rule_updated:
+            updated.append(event_name)
 
-    return added
+    return added, updated
 
 
 def install_hooks(*, dry_run: bool = False, backup: bool = True) -> str:
@@ -414,15 +511,22 @@ def install_hooks(*, dry_run: bool = False, backup: bool = True) -> str:
     data = _read_json(path)
     # Marker matches bare, absolute, and .EXE spellings of our command so a
     # re-init dedups against an existing install instead of appending a copy.
-    added = _merge_hooks(data, _enforcement_hooks(), "jdocmunch-mcp")
+    added, updated = _merge_hooks(data, _enforcement_hooks(), "jdocmunch-mcp")
 
-    if not added:
+    if not added and not updated:
         return f"  hooks already present in {path}"
+    would, done = [], []
+    if added:
+        would.append(f"add {', '.join(added)}")
+        done.append(f"added {', '.join(added)}")
+    if updated:
+        would.append(f"update {', '.join(updated)}")
+        done.append(f"updated {', '.join(updated)}")
     if dry_run:
-        return f"  would add {', '.join(added)} hooks to {path}"
+        return f"  would {', '.join(would)} hooks in {path}"
 
     _write_json(path, data, backup=backup)
-    return f"  added {', '.join(added)} hooks to {path}"
+    return f"  {', '.join(done)} hooks in {path}"
 
 
 # ---------------------------------------------------------------------------
