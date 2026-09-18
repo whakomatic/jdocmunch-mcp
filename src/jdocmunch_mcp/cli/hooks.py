@@ -1,6 +1,6 @@
 """Claude Code hook handlers for jDocMunch enforcement.
 
-PreToolUse  -- intercept Read on large doc files, suggest jDocMunch tools.
+PreToolUse  -- on Read, Grep or Bash reads of large doc files, suggest jDocMunch tools.
 PostToolUse -- auto-reindex after Edit/Write on doc files to keep the index fresh.
 PreCompact  -- emit a session snapshot so doc orientation survives context compaction.
 
@@ -10,6 +10,7 @@ All read JSON from stdin and write JSON to stdout per the Claude Code hooks spec
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -38,6 +39,27 @@ _DOC_EXTENSIONS: set[str] = {
     ".xml", ".svg", ".xhtml",
     ".tscn", ".tres",
 }
+
+# Parsers that produce prose sections. Both hint branches gate on the
+# extensions these cover, resolved from the parser registry at call time. The
+# rest of the registry is data: openapi/json need a content sniff to be worth
+# anything, xml builds a node tree and godot is scene data, so "prefer
+# search_sections" is wrong advice there. Reindexing still covers the full
+# _DOC_EXTENSIONS set; only the hints narrow.
+_PROSE_PARSERS: frozenset[str] = frozenset({
+    "markdown", "text", "rst", "asciidoc", "notebook", "html",
+})
+
+
+def _prose_extensions() -> set[str]:
+    """Extensions whose parser produces prose sections.
+
+    Imported lazily: a hook pays its imports on every tool call, and the parser
+    package costs ~70ms against this module's ~9ms.
+    """
+    from ..parser import ALL_EXTENSIONS
+    return {e for e, k in ALL_EXTENSIONS.items() if k in _PROSE_PARSERS}
+
 
 # Minimum file size (bytes) to trigger the jDocMunch suggestion.
 # Override with JDOCMUNCH_HOOK_MIN_SIZE env var.
@@ -205,12 +227,125 @@ def run_hook_reindex(path: str) -> int:
     return 0
 
 
-def run_pretooluse() -> int:
-    """PreToolUse hook: intercept Read calls on large doc files.
+# Shell commands that read a file's text. Over a prose file they do by hand
+# what get_document_outline and get_section do -- `grep -n "^## "` for the
+# headings, then `sed -n 'a,bp'` for the one section wanted -- and a hook
+# matching `Read` alone never saw any of it.
+_BASH_DOC_READERS = frozenset({
+    "grep", "egrep", "fgrep", "rg", "sed", "awk", "head", "tail", "cat", "less",
+})
+_BASH_SEGMENT_SPLIT_RE = re.compile(r"&&|\|\||[;|\n]")
+_BASH_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_]\w*=")
 
-    Reads hook JSON from stdin.  If the target is a doc file above the
-    size threshold, emits a hint directing Claude to use jDocMunch tools
-    instead, as ``hookSpecificOutput.additionalContext`` JSON on stdout.
+
+def _bash_doc_read(command: str, cwd: str) -> "str | None":
+    """Return the prose file a Bash command reads by hand, or None.
+
+    Each segment of a compound command is judged on its own, so the dominant
+    shape `cd docs && sed -n '1,80p' x.md` is seen. A segment qualifies when it
+    opens with a reader and names a token with a prose extension, including an
+    ``--include=*.md`` filter. ``sed -i`` is an edit, not a read, and passes.
+
+    A token that resolves against `cwd` and is under the size threshold passes,
+    on the Read branch's rule. The exemption is best-effort, not a guarantee:
+    a glob, a variable, or a path relative to a `cd` earlier in the line does
+    not resolve here, and those nudge whatever their size. `cd docs && cat
+    small.md` is the common case -- a valid command on a real file that this
+    cannot size, so it gets advice it did not need. Sizing those would mean
+    tracking the shell's working directory, which is more parsing than an
+    advisory hint is worth, and the cost of being wrong is one sentence.
+
+    Prose extensions come from the parser registry rather than a list kept
+    here, so a new prose format is nudged without anyone remembering to add it.
+    """
+    prose_exts = _prose_extensions()
+
+    for segment in _BASH_SEGMENT_SPLIT_RE.split(command):
+        words = segment.split()
+        while words and _BASH_ASSIGNMENT_RE.match(words[0]):
+            words.pop(0)
+        if words and words[0] == "command":
+            words.pop(0)
+        if not words or os.path.basename(words[0]) not in _BASH_DOC_READERS:
+            continue
+        if words[0] == "sed" and any(
+            w.startswith("-i") or w == "--in-place" for w in words[1:]
+        ):
+            continue
+        for word in words[1:]:
+            token = word.strip("\"'")
+            if token.startswith("-"):
+                token = token.partition("=")[2].strip("\"'")
+            _, ext = os.path.splitext(token)
+            if ext.lower() not in prose_exts or _is_small_file(token, cwd):
+                continue
+            return token
+    return None
+
+
+def _is_small_file(path: str, cwd: str) -> bool:
+    """True when `path` resolves against `cwd` to a file under the size threshold.
+
+    A path that does not resolve is not known to be small, so it is False.
+    """
+    try:
+        return os.path.getsize(os.path.join(cwd, path)) < _MIN_SIZE_BYTES
+    except (OSError, ValueError):
+        return False
+
+
+# ripgrep `--type` names that select prose files, each mapped to one extension
+# of that type. Whether the extension is prose still comes from the parser
+# registry; this table only translates ripgrep's names.
+_RG_TYPE_EXTENSIONS = {
+    "md": ".md", "markdown": ".md", "rst": ".rst", "asciidoc": ".adoc",
+    "txt": ".txt", "html": ".html", "jupyter": ".ipynb",
+}
+_GLOB_BRACE_RE = re.compile(r"\.\{([^}]*)\}")
+_GLOB_SPLIT_RE = re.compile(r"[,{}\s]")
+
+
+def _grep_doc_read(tool_input: dict, cwd: str) -> "str | None":
+    """Return what a Grep tool call reads by hand in prose files, or None.
+
+    The Grep tool is the built-in form of `grep -n "^## " doc.md`, and neither
+    the Read nor the Bash branch sees it. It qualifies when its `path` is a
+    prose file (with the Bash branch's size rule), or when its `glob` or
+    `type` restricts the search to prose files. A search over a directory with
+    no such filter is left alone: it is a code search as often as not, and
+    jcodemunch-mcp's hook already steers that route.
+    """
+    prose_exts = _prose_extensions()
+
+    path = tool_input.get("path")
+    if isinstance(path, str) and path:
+        _, ext = os.path.splitext(path)
+        if ext.lower() in prose_exts:
+            return None if _is_small_file(path, cwd) else path
+
+    glob = tool_input.get("glob")
+    if isinstance(glob, str):
+        braced = [f".{alt.strip()}" for group in _GLOB_BRACE_RE.findall(glob)
+                  for alt in group.split(",")]
+        plain = [os.path.splitext(p)[1] for p in _GLOB_SPLIT_RE.split(glob)]
+        if any(e.lower() in prose_exts for e in braced + plain):
+            return glob
+
+    rg_type = tool_input.get("type")
+    if isinstance(rg_type, str) and _RG_TYPE_EXTENSIONS.get(rg_type) in prose_exts:
+        return f"type {rg_type}"
+
+    return None
+
+
+def run_pretooluse() -> int:
+    """PreToolUse hook: steer Read, Bash and Grep reads of doc files to jDocMunch.
+
+    Reads hook JSON from stdin. A Read of a prose file above the size
+    threshold, a Bash command that greps or slices one (see
+    ``_bash_doc_read``), or a Grep aimed at prose files (see
+    ``_grep_doc_read``) gets a hint naming the jDocMunch tools instead,
+    as ``hookSpecificOutput.additionalContext`` JSON on stdout.
 
     ⚠ That channel is the ONLY one that reaches the model from an exit-0
     PreToolUse hook (#129). stderr on exit 0 goes to the debug log; plain
@@ -218,7 +353,11 @@ def run_pretooluse() -> int:
     a top-level ``systemMessage`` surfaces to the user. The hint was written
     to stderr from 1.66.3 through 1.139.1 and was never received.
 
-    Small files, non-doc files, and unreadable paths are silently allowed.
+    Small files, non-prose files, and unreadable paths are silently allowed.
+    Gated on the prose parsers, not the full _DOC_EXTENSIONS set: the data
+    formats the indexer accepts (.json, .yaml, .xml, .svg, .tscn) have no
+    sections to search, so pointing Read at search_sections for them is wrong
+    advice.
 
     Returns exit code (always 0 -- errors are swallowed to avoid blocking).
     """
@@ -227,12 +366,31 @@ def run_pretooluse() -> int:
     except (json.JSONDecodeError, ValueError):
         return 0
 
+    tool_name = data.get("tool_name")
+    if tool_name in ("Bash", "Grep"):
+        tool_input = data.get("tool_input", {})
+        cwd = data.get("cwd") or os.getcwd()
+        if tool_name == "Bash":
+            command = tool_input.get("command", "")
+            target = _bash_doc_read(command, cwd) if isinstance(command, str) else None
+        else:
+            target = _grep_doc_read(tool_input, cwd)
+        if target is None:
+            return 0
+        return _emit_additional_context(
+            "PreToolUse",
+            f"jDocMunch hint: this {'command' if tool_name == 'Bash' else 'search'} "
+            f"reads `{target}` by hand. get_document_outline lists its headings, "
+            "get_section reads one section, search_sections searches the docs. "
+            f"Use {tool_name} only for the exact lines an Edit needs.",
+        )
+
     file_path: str = data.get("tool_input", {}).get("file_path", "")
     if not file_path:
         return 0
 
     _, ext = os.path.splitext(file_path)
-    if ext.lower() not in _DOC_EXTENSIONS:
+    if ext.lower() not in _prose_extensions():
         return 0
 
     try:
