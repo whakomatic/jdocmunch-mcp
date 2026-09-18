@@ -943,6 +943,39 @@ class DocStore:
         except Exception:
             pass  # best-effort; never fail a save over the sidecar safety net
 
+    @staticmethod
+    def _summary_payload(get, section_count: int, doc_count: int) -> dict:
+        """The sidecar's fields, read through ``get(key, default)``.
+
+        ONE definition, two sources: the save path reads a ``DocIndex`` via
+        ``getattr``, and ``list_repos``'s heal reads the monolith dict it just
+        parsed via ``dict.get``. A second copy of this field list would drift,
+        and a healed sidecar that disagreed with a saved one would make an
+        index read differently depending on which path last touched it.
+        """
+        return {
+            "repo": get("repo"),
+            "indexed_at": get("indexed_at"),
+            "section_count": section_count,
+            "doc_count": doc_count,
+            "doc_types": get("doc_types"),
+            "index_version": get("index_version", 1),
+            "head_sha": get("head_sha", None),
+            "source_dirty": bool(get("source_dirty", False)),
+            "sha_certified": bool(get("sha_certified", False)),
+            "source_root": get("source_root", "") or "",
+            "source_repo": get("source_repo", "") or "",
+            "corpus_selection": get("corpus_selection", "") or "",
+            "corpus_shape_patterns": list(get("corpus_shape_patterns", None) or []),
+            "worktree_lineage_key": get("worktree_lineage_key", "") or "",
+            "repo_relative_root": get("repo_relative_root", "") or "",
+            "reconciliation_state": get("reconciliation_state", "") or "",
+            # jdoc#85 C1-09: written even when 0 so the summary's presence
+            # or absence of THIS KEY distinguishes a pre-fix summary (fall
+            # back to the monolith) from a genuinely legacy index.
+            "corpus_identity_version": int(get("corpus_identity_version", 0) or 0),
+        }
+
     def _write_summary(self, owner: str, name: str, index: "DocIndex") -> None:
         """Persist a tiny summary next to the monolith so list_repos never has to
         json-parse the whole index just to take two ``len()``s (jdoc#77).
@@ -954,39 +987,23 @@ class DocStore:
         full parse when the summary is absent or unreadable).
         """
         try:
-            summary = {
-                "repo": index.repo,
-                "indexed_at": index.indexed_at,
-                "section_count": len(index.sections),
-                "doc_count": len(index.doc_paths),
-                "doc_types": index.doc_types,
-                "index_version": index.index_version,
-                "head_sha": index.head_sha,
-                "source_dirty": bool(index.source_dirty),
-                "sha_certified": bool(index.sha_certified),
-                "source_root": getattr(index, "source_root", "") or "",
-                "source_repo": getattr(index, "source_repo", "") or "",
-                "corpus_selection": getattr(index, "corpus_selection", "") or "",
-                "corpus_shape_patterns": list(
-                    getattr(index, "corpus_shape_patterns", None) or []
+            self._persist_summary(
+                self._summary_path(owner, name),
+                self._summary_payload(
+                    lambda key, default="": getattr(index, key, default),
+                    len(index.sections),
+                    len(index.doc_paths),
                 ),
-                "worktree_lineage_key": getattr(index, "worktree_lineage_key", "") or "",
-                "repo_relative_root": getattr(index, "repo_relative_root", "") or "",
-                "reconciliation_state": getattr(index, "reconciliation_state", "") or "",
-                # jdoc#85 C1-09: written even when 0 so the summary's presence
-                # or absence of THIS KEY distinguishes a pre-fix summary (fall
-                # back to the monolith) from a genuinely legacy index.
-                "corpus_identity_version": int(
-                    getattr(index, "corpus_identity_version", 0) or 0
-                ),
-            }
-            summary_path = self._summary_path(owner, name)
-            tmp = summary_path.with_name(f"{summary_path.name}.{os.getpid()}.tmp")
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(summary, f, separators=(",", ":"))
-            self._atomic_replace(tmp, summary_path)
+            )
         except (OSError, ValueError, TypeError):
             pass
+
+    def _persist_summary(self, summary_path: Path, summary: dict) -> None:
+        """Atomically write one summary sidecar."""
+        tmp = summary_path.with_name(f"{summary_path.name}.{os.getpid()}.tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(summary, f, separators=(",", ":"))
+        self._atomic_replace(tmp, summary_path)
 
     def _safe_content_path(self, content_dir: Path, relative_path: str) -> Optional[Path]:
         try:
@@ -1777,13 +1794,23 @@ class DocStore:
             try:
                 with open(index_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                repos.append(self._summary_row(
-                    len(data["sections"]),
-                    len(data["doc_paths"]),
-                    data,
-                ))
+                section_count = len(data["sections"])
+                doc_count = len(data["doc_paths"])
+                repos.append(self._summary_row(section_count, doc_count, data))
             except Exception:
                 continue
+            # Heal the sidecar we just paid for. Without this the fallback is
+            # not a fallback but the steady state for any index that has not
+            # been saved since jdoc#77: it is re-parsed in full on EVERY call,
+            # and only a save of that index would ever write its summary.
+            # Best-effort and idempotent, like every other summary write.
+            try:
+                self._persist_summary(
+                    index_file.with_name(f"{index_file.stem}.summary.json"),
+                    self._summary_payload(data.get, section_count, doc_count),
+                )
+            except Exception:
+                pass
         return repos
 
     def _cancel_pending_retirement(self, owner: str, name: str) -> None:

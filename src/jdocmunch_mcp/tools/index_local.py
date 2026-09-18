@@ -32,7 +32,13 @@ from ..storage.doc_store import INDEX_OWNED_SIDECAR_SUFFIXES, normalize_commit_s
 from ..summarizer import summarize_sections
 from ..embeddings import embed_sections, get_provider_name, should_embed
 from ._embedding_coverage import attach_embedding_coverage as _attach_embedding_coverage
-from ._git import local_git_head, local_git_paths_dirty, local_git_paths_tracked, stable_local_git_state
+from ._git import (
+    is_linked_worktree,
+    local_git_head,
+    local_git_paths_dirty,
+    local_git_paths_tracked,
+    stable_local_git_state,
+)
 from ._constants import SKIP_PATTERNS, is_skipped_dot_dir
 
 
@@ -1458,6 +1464,13 @@ def discover_doc_files(
                 continue
             walk_rel = _walk_rel(dir_rel, f"{d}/")
             if _should_skip(walk_rel):
+                continue
+            # A linked worktree is pruned here rather than through
+            # SKIP_PATTERNS, which matches path substrings and so cannot
+            # express "this directory is a separate checkout": the parent index
+            # would otherwise take a copy of every file per worktree on disk,
+            # and the same file would be indexed once per checkout.
+            if is_linked_worktree(dir_path / d):
                 continue
             if gitignore_spec and gitignore_spec.match_file(walk_rel):
                 continue

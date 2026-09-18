@@ -16,57 +16,86 @@ from ..storage.doc_store import normalize_commit_sha
 from ..summarizer import summarize_sections
 from ..embeddings import embed_sections
 from ._embedding_coverage import attach_embedding_coverage as _attach_embedding_coverage
-from ._git import local_git_head, local_git_paths_dirty, local_git_paths_tracked
+from ._git import (
+    linked_worktree_between,
+    local_git_head,
+    local_git_paths_dirty,
+    local_git_paths_tracked,
+)
 
 
 def _find_owning_index(
     file_path: Path,
     store: DocStore,
 ) -> Optional[tuple[str, str, str, Path]]:
-    """Find which index owns a given file path.
+    """Find which index owns a given file path, by CONTAINMENT.
 
-    Walks up the directory tree from the file, checking each ancestor
-    folder name against existing local indexes.  When a match is found,
-    verifies that the relative path exists in the index's doc_paths.
+    Two rules, and the second is not implied by the first.
+
+    RULE 1, ownership by containment. The owner is the index whose stored
+    ``source_root`` contains the file, deepest root winning when several do.
+    A file under no index's root is refused rather than adopted, and the
+    stored path is always relative to the winning root, so one file can never
+    acquire two spellings.
+
+    RULE 2, worktree refusal. A file inside a linked git worktree is owned
+    only by an index rooted at that worktree, never by the parent repository's
+    index, whose ``source_root`` may well contain it. Worktree content enters
+    the parent's index when it merges.
+
+    ⚠⚠ This used to resolve by FOLDER NAME: it walked up from the file loading
+    ``local/<ancestor folder name>`` and, when the computed relative path was
+    unknown, took ownership anyway on the sole condition that the index had any
+    doc_paths at all. ``source_root`` was never consulted. So an index named
+    ``myrepo`` rooted at ``myrepo/docs`` claimed every doc file anywhere in
+    ``myrepo/``, linked worktrees included, and stored them repo-relative
+    while the walk stored root-relative: an edit to ``docs/guide.md`` was
+    stored as a second entry ``docs/guide.md`` beside ``guide.md``, and the
+    fresh content went to the entry the walk never refreshes.
+
+    ⚠ ``doc_paths`` is deliberately not consulted any more. Containment alone
+    decides ownership, so a genuinely new file under the root is admitted
+    because nothing asks whether it is already known. That was the old
+    fallback's legitimate purpose; its defect was running before containment
+    had ever been tested.
 
     Returns (owner, name, rel_path, source_root) or None.
     """
     file_path = file_path.resolve()
-    parts = file_path.parts
 
-    # Try each ancestor directory as a potential source root
-    import re
-    for i in range(len(parts) - 1, 0, -1):
-        candidate_root = Path(*parts[:i])
-        folder_name = parts[i - 1]
-
-        # Skip invalid folder names (drive roots, dots, etc.)
-        if not folder_name or not re.fullmatch(r"[A-Za-z0-9._-]+", folder_name):
-            continue
-
-        # Check if a local index with this name exists
+    # `list_repos` rows carry `source_root` and are read from the tiny summary
+    # sidecars, so this is a metadata scan rather than one index load per
+    # candidate. Do NOT replace this with a `_resolve_named_index` call per
+    # candidate, which loads every index, on a path that fires on every
+    # markdown write.
+    best: Optional[tuple[str, str, str, Path]] = None
+    best_depth = -1
+    for row in store.list_repos():
+        source_root = row.get("source_root") or ""
+        if not source_root:
+            continue  # legacy index with no recorded root: not resolvable here
         try:
-            index = store.load_index("local", folder_name)
-        except ValueError:
+            root = Path(source_root).expanduser().resolve()
+            if not file_path.is_relative_to(root):
+                continue
+        except (OSError, ValueError):
             continue
-        if index is None:
-            continue
+        if linked_worktree_between(root, file_path) is not None:
+            continue  # RULE 2: the parent's index does not own worktree content
+        depth = len(root.parts)
+        if depth > best_depth:
+            owner, _, bare = str(row.get("repo", "")).partition("/")
+            if not bare:
+                continue
+            best = (
+                owner or "local",
+                bare,
+                file_path.relative_to(root).as_posix(),
+                root,
+            )
+            best_depth = depth
 
-        # Check if the file's relative path is in this index
-        try:
-            rel_path = file_path.relative_to(candidate_root).as_posix()
-        except ValueError:
-            continue
-
-        if rel_path in index.doc_paths or rel_path in index.file_hashes:
-            return ("local", folder_name, rel_path, candidate_root)
-
-        # The file might be new (not yet in doc_paths) but under this root
-        # Accept if the root contains other indexed files
-        if index.doc_paths:
-            return ("local", folder_name, rel_path, candidate_root)
-
-    return None
+    return best
 
 
 def _resolve_named_index(

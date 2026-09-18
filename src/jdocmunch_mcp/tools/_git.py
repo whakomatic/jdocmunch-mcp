@@ -279,3 +279,65 @@ def stable_local_git_state(
     after_sha, after_dirty = after
     moved = before_sha != after_sha and bool(before_sha or after_sha)
     return after_sha or before_sha, bool(before_dirty or after_dirty or moved)
+
+
+def is_linked_worktree(path: Path) -> bool:
+    """True when ``path`` is the top of a linked ``git worktree`` checkout.
+
+    A linked worktree marks its root with a ``.git`` FILE whose ``gitdir:``
+    target lives under the main checkout's ``.git/worktrees/<name>``.
+    Submodules also use a ``.git`` file but point at ``.git/modules/<name>``,
+    so they deliberately do NOT match: a submodule's content IS indexed into
+    the parent, and a worktree's is not.
+
+    Detected by the ``.git`` marker, never by a ``.worktrees/`` path
+    convention. No tool enforces that name, so a path test would both miss
+    worktrees created elsewhere and refuse an ordinary directory that happens
+    to be called that.
+
+    No subprocess: this runs inside the per-file resolver on the re-index
+    hook's path, which fires on every markdown write.
+
+    Ported from jcodemunch's ``storage/git_root.py``, which carries the same
+    rule for the code index.
+    """
+    dotgit = path / ".git"
+    try:
+        if not dotgit.is_file():
+            return False
+        text = dotgit.read_text(encoding="utf-8", errors="ignore").strip()
+    except OSError:
+        return False
+    if not text.startswith("gitdir:"):
+        return False
+    target = Path(text[len("gitdir:"):].strip())
+    if not target.is_absolute():
+        target = path / target
+    return target.parent.name == "worktrees"
+
+
+def linked_worktree_between(source_root: Path, path: Path) -> Optional[Path]:
+    """Root of a linked worktree between an indexed root and a path, or None.
+
+    ⚠⚠ Containment does NOT imply the worktree rule, and this is the whole
+    reason the check exists as a separate question. ``<repo>/.worktrees/<x>/f.md``
+    is genuinely inside ``<repo>``, so an index rooted at the repo contains it
+    on every test an ownership resolver would ordinarily make. Only a
+    worktree test that follows the containment match refuses it.
+
+    ``source_root`` itself is never tested, so an index rooted AT the worktree
+    owns its own files: worktree content belongs to the worktree's index or to
+    none, and it enters the parent's when it merges.
+    """
+    try:
+        if not path.is_relative_to(source_root):
+            return None
+        rel = path.relative_to(source_root)
+    except (OSError, ValueError):
+        return None
+    ancestor = source_root
+    for part in rel.parts[:-1]:  # exclude the filename itself
+        ancestor = ancestor / part
+        if is_linked_worktree(ancestor):
+            return ancestor
+    return None

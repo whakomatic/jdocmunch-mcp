@@ -106,8 +106,15 @@ def test_index_file_name_override_on_spaced_folder():
         index_local(path=str(corpus), name="spaced-repro", storage_path=store,
                     use_ai_summaries=False, use_embeddings=False)
 
-        # Detection cannot reverse a spaced folder name -> fails without --name.
-        assert not index_file(str(doc), storage_path=store).get("success")
+        # Detection USED to fail here: ownership was resolved by matching an
+        # ancestor FOLDER NAME against an index name, and "spaced folder
+        # repro" cannot be reversed into "spaced-repro". Resolution is by
+        # source_root containment now, which never consults the folder name,
+        # so the escape hatch is no longer needed to reach this corpus. The
+        # #38 override itself is unaffected and is asserted below.
+        detected = index_file(str(doc), storage_path=store)
+        assert detected.get("success"), detected
+        assert detected["repo"] == "local/spaced-repro"
         # Explicit name resolves it.
         res = index_file(str(doc), storage_path=store, name="local/spaced-repro")
         assert res.get("success"), res
