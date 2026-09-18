@@ -10,6 +10,7 @@ All read JSON from stdin and write JSON to stdout per the Claude Code hooks spec
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -38,6 +39,27 @@ _DOC_EXTENSIONS: set[str] = {
     ".xml", ".svg", ".xhtml",
     ".tscn", ".tres",
 }
+
+# Parsers that produce prose sections. Both hint branches gate on the
+# extensions these cover, resolved from the parser registry at call time. The
+# rest of the registry is data: openapi/json need a content sniff to be worth
+# anything, xml builds a node tree and godot is scene data, so "prefer
+# search_sections" is wrong advice there. Reindexing still covers the full
+# _DOC_EXTENSIONS set; only the hints narrow.
+_PROSE_PARSERS: frozenset[str] = frozenset({
+    "markdown", "text", "rst", "asciidoc", "notebook", "html",
+})
+
+
+def _prose_extensions() -> set[str]:
+    """Extensions whose parser produces prose sections.
+
+    Imported lazily: a hook pays its imports on every tool call, and the parser
+    package costs ~70ms against this module's ~9ms.
+    """
+    from ..parser import ALL_EXTENSIONS
+    return {e for e, k in ALL_EXTENSIONS.items() if k in _PROSE_PARSERS}
+
 
 # Minimum file size (bytes) to trigger the jDocMunch suggestion.
 # Override with JDOCMUNCH_HOOK_MIN_SIZE env var.
@@ -205,12 +227,74 @@ def run_hook_reindex(path: str) -> int:
     return 0
 
 
-def run_pretooluse() -> int:
-    """PreToolUse hook: intercept Read calls on large doc files.
+# Shell commands that read a file's text. Over a prose file they do by hand
+# what get_document_outline and get_section do -- `grep -n "^## "` for the
+# headings, then `sed -n 'a,bp'` for the one section wanted -- and a hook
+# matching `Read` alone never saw any of it.
+_BASH_DOC_READERS = frozenset({
+    "grep", "egrep", "fgrep", "rg", "sed", "awk", "head", "tail", "cat", "less",
+})
+_BASH_SEGMENT_SPLIT_RE = re.compile(r"&&|\|\||[;|\n]")
+_BASH_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_]\w*=")
 
-    Reads hook JSON from stdin.  If the target is a doc file above the
-    size threshold, emits a hint directing Claude to use jDocMunch tools
-    instead, as ``hookSpecificOutput.additionalContext`` JSON on stdout.
+
+def _bash_doc_read(command: str, cwd: str) -> "str | None":
+    """Return the prose file a Bash command reads by hand, or None.
+
+    Each segment of a compound command is judged on its own, so the dominant
+    shape `cd docs && sed -n '1,80p' x.md` is seen. A segment qualifies when it
+    opens with a reader and names a token with a prose extension, including an
+    ``--include=*.md`` filter. ``sed -i`` is an edit, not a read, and passes.
+
+    A token that resolves against `cwd` and is under the size threshold passes,
+    on the Read branch's rule. The exemption is best-effort, not a guarantee:
+    a glob, a variable, or a path relative to a `cd` earlier in the line does
+    not resolve here, and those nudge whatever their size. `cd docs && cat
+    small.md` is the common case -- a valid command on a real file that this
+    cannot size, so it gets advice it did not need. Sizing those would mean
+    tracking the shell's working directory, which is more parsing than an
+    advisory hint is worth, and the cost of being wrong is one sentence.
+
+    Prose extensions come from the parser registry rather than a list kept
+    here, so a new prose format is nudged without anyone remembering to add it.
+    """
+    prose_exts = _prose_extensions()
+
+    for segment in _BASH_SEGMENT_SPLIT_RE.split(command):
+        words = segment.split()
+        while words and _BASH_ASSIGNMENT_RE.match(words[0]):
+            words.pop(0)
+        if words and words[0] == "command":
+            words.pop(0)
+        if not words or os.path.basename(words[0]) not in _BASH_DOC_READERS:
+            continue
+        if words[0] == "sed" and any(
+            w.startswith("-i") or w == "--in-place" for w in words[1:]
+        ):
+            continue
+        for word in words[1:]:
+            token = word.strip("\"'")
+            if token.startswith("-"):
+                token = token.partition("=")[2].strip("\"'")
+            _, ext = os.path.splitext(token)
+            if ext.lower() not in prose_exts:
+                continue
+            try:
+                if os.path.getsize(os.path.join(cwd, token)) < _MIN_SIZE_BYTES:
+                    continue
+            except (OSError, ValueError):
+                pass
+            return token
+    return None
+
+
+def run_pretooluse() -> int:
+    """PreToolUse hook: steer Read and Bash reads of doc files to jDocMunch.
+
+    Reads hook JSON from stdin. A Read of a prose file above the size
+    threshold, or a Bash command that greps or slices one (see
+    ``_bash_doc_read``), gets a hint naming the jDocMunch tools instead,
+    as ``hookSpecificOutput.additionalContext`` JSON on stdout.
 
     ⚠ That channel is the ONLY one that reaches the model from an exit-0
     PreToolUse hook (#129). stderr on exit 0 goes to the debug log; plain
@@ -218,7 +302,11 @@ def run_pretooluse() -> int:
     a top-level ``systemMessage`` surfaces to the user. The hint was written
     to stderr from 1.66.3 through 1.139.1 and was never received.
 
-    Small files, non-doc files, and unreadable paths are silently allowed.
+    Small files, non-prose files, and unreadable paths are silently allowed.
+    Gated on the prose parsers, not the full _DOC_EXTENSIONS set: the data
+    formats the indexer accepts (.json, .yaml, .xml, .svg, .tscn) have no
+    sections to search, so pointing Read at search_sections for them is wrong
+    advice.
 
     Returns exit code (always 0 -- errors are swallowed to avoid blocking).
     """
@@ -227,12 +315,27 @@ def run_pretooluse() -> int:
     except (json.JSONDecodeError, ValueError):
         return 0
 
+    if data.get("tool_name") == "Bash":
+        command = data.get("tool_input", {}).get("command", "")
+        if not isinstance(command, str):
+            return 0
+        token = _bash_doc_read(command, data.get("cwd") or os.getcwd())
+        if token is None:
+            return 0
+        return _emit_additional_context(
+            "PreToolUse",
+            f"jDocMunch hint: this command reads `{token}` by hand. "
+            "get_document_outline lists its headings, get_section reads one "
+            "section, search_sections searches the docs. Use Bash only for the "
+            "exact bytes an Edit needs.",
+        )
+
     file_path: str = data.get("tool_input", {}).get("file_path", "")
     if not file_path:
         return 0
 
     _, ext = os.path.splitext(file_path)
-    if ext.lower() not in _DOC_EXTENSIONS:
+    if ext.lower() not in _prose_extensions():
         return 0
 
     try:

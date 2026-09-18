@@ -72,7 +72,7 @@ def _enforcement_hooks() -> dict[str, list]:
     exe = _hook_invocation()
     return {
         "PreToolUse": [{
-            "matcher": "Read",
+            "matcher": "Read|Bash",
             "hooks": [{"type": "command", "command": f"{exe} hook-pretooluse"}],
         }],
         "PostToolUse": [{

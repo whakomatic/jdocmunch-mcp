@@ -78,6 +78,77 @@ class TestPreToolUse:
     def test_handles_missing_file_path(self):
         assert self._run({"tool_input": {}}) == 0
 
+    # -- Bash branch: hand-rolled doc reads --------------------------------
+
+    def _bash(self, command, cwd, capsys):
+        assert self._run({"tool_name": "Bash", "cwd": str(cwd),
+                          "tool_input": {"command": command}}) == 0
+        out = capsys.readouterr().out
+        return json.loads(out)["hookSpecificOutput"]["additionalContext"] if out else None
+
+    def test_bash_sed_range_on_doc_after_cd_nudges(self, tmp_path, capsys):
+        (tmp_path / "big.md").write_text("x" * 5000)
+        hint = self._bash(f"cd {tmp_path} && sed -n '1,80p' big.md", tmp_path, capsys)
+        assert hint and "get_section" in hint and "big.md" in hint
+
+    def test_bash_grep_headings_on_doc_nudges(self, tmp_path, capsys):
+        (tmp_path / "gotchas.md").write_text("x" * 5000)
+        assert self._bash('grep -n "^## " gotchas.md | tail -45', tmp_path, capsys)
+
+    def test_bash_grep_include_md_nudges(self, tmp_path, capsys):
+        assert self._bash("grep -rn Haven --include=*.md docs/", tmp_path, capsys)
+
+    def test_bash_unresolvable_doc_path_nudges(self, tmp_path, capsys):
+        assert self._bash("sed -n '1,5p' docs/missing.md", tmp_path, capsys)
+
+    def test_bash_small_doc_is_silent(self, tmp_path, capsys):
+        (tmp_path / "tiny.md").write_text("hi")
+        assert self._bash("cat tiny.md", tmp_path, capsys) is None
+
+    def test_bash_small_doc_behind_a_cd_still_nudges(self, tmp_path, capsys):
+        """The size exemption needs a path that resolves against cwd.
+
+        A `cd` earlier in the line moves the shell but not this hook, so a real
+        file that happens to be small gets advice it did not need. Pinned as
+        the accepted cost of not tracking the shell's working directory.
+        """
+        (tmp_path / "docs").mkdir()
+        (tmp_path / "docs" / "small.md").write_text("tiny")
+        assert self._bash("cd docs && cat small.md", tmp_path, capsys)
+
+    def test_bash_sed_in_place_is_silent(self, tmp_path, capsys):
+        (tmp_path / "big.md").write_text("x" * 5000)
+        assert self._bash("sed -i 's/a/b/' big.md", tmp_path, capsys) is None
+
+    def test_bash_code_search_is_silent(self, tmp_path, capsys):
+        assert self._bash("grep -rn foo src/app.py", tmp_path, capsys) is None
+
+    def test_bash_non_reader_is_silent(self, tmp_path, capsys):
+        (tmp_path / "big.md").write_text("x" * 5000)
+        assert self._bash("wc -l big.md && git status", tmp_path, capsys) is None
+
+    def test_bash_non_string_command_is_silent(self, tmp_path, capsys):
+        assert self._run({"tool_name": "Bash", "tool_input": {"command": 3}}) == 0
+        assert capsys.readouterr().out == ""
+
+    def test_prose_parsers_are_all_real_parser_keys(self):
+        """A typo'd key would silently drop a format from the nudge."""
+        from jdocmunch_mcp.cli.hooks import _PROSE_PARSERS
+        from jdocmunch_mcp.parser import ALL_EXTENSIONS
+        assert _PROSE_PARSERS <= set(ALL_EXTENSIONS.values())
+
+    def test_nudge_covers_prose_and_excludes_data_formats(self):
+        """Extensions named independently of _PROSE_PARSERS, so widening that
+        set to a data parser fails here rather than restating itself."""
+        from jdocmunch_mcp.cli.hooks import _PROSE_PARSERS
+        from jdocmunch_mcp.parser import ALL_EXTENSIONS
+        prose = {e for e, k in ALL_EXTENSIONS.items() if k in _PROSE_PARSERS}
+        assert {".md", ".mdx", ".txt", ".rst", ".adoc", ".ipynb", ".html"} <= prose
+        assert prose.isdisjoint(
+            {".json", ".jsonc", ".yaml", ".yml", ".xml", ".svg", ".xhtml",
+             ".tscn", ".tres"}
+        )
+
     def test_handles_nonexistent_file(self):
         assert self._run({"tool_input": {"file_path": "/nonexistent/doc.md"}}) == 0
 
