@@ -60,7 +60,7 @@ def _discovered(root):
     entry point that moves should fail this file loudly, not skip it."""
     from jdocmunch_mcp.tools.index_local import discover_doc_files
 
-    files, _warnings, _count = discover_doc_files(root, max_files=10_000)
+    files, _warnings, _count, _mtimes = discover_doc_files(root, max_files=10_000)
     return [str(f).replace("\\", "/") for f in files]
 
 
