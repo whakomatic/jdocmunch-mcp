@@ -235,7 +235,7 @@ class TestRule2WorktreeRefusal:
         wt = _fake_worktree(repo, "worktrees/pkg")
         (wt / "readme.md").write_text("# Readme from the worktree\n", encoding="utf-8")
 
-        files, _warnings, _discovered = discover_doc_files(repo)
+        files, _warnings, _discovered, _mtimes = discover_doc_files(repo)
         rels = sorted(p.relative_to(repo).as_posix() for p in files)
         assert rels == ["readme.md"]
 
