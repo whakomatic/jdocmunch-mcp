@@ -55,10 +55,12 @@ if [ -z "${FORK_SYNC_REEXEC:-}" ]; then
     self=$(mktemp)
     MSYS_NO_PATHCONV=1 git show "refs/heads/local/main:scripts/fork-sync.sh" > "$self" \
         || { rm -f "$self"; echo "local/main has no committed scripts/fork-sync.sh." >&2; exit 1; }
-    FORK_SYNC_REEXEC=1 FORK_SYNC_ROOT=$(pwd) exec bash "$self" "$@"
+    FORK_SYNC_REEXEC=1 FORK_SYNC_ROOT=$(pwd) FORK_SYNC_SELF=$self exec bash "$self" "$@"
 fi
 cd "$FORK_SYNC_ROOT"
-CLEANUP=("${BASH_SOURCE[0]}")
+# Only the temp copy: with FORK_SYNC_REEXEC set by hand, BASH_SOURCE is the
+# working tree's own script, which must survive.
+CLEANUP=(${FORK_SYNC_SELF:+"$FORK_SYNC_SELF"})
 trap 'rm -rf "${CLEANUP[@]}"' EXIT
 
 UPSTREAM_REMOTE=upstream
