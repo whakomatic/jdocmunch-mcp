@@ -40,7 +40,7 @@ def test_sort_by_newest_keeps_recent_files_when_truncated(tmp_path):
         tmp_path,
         ["old_a.md", "old_b.md", "old_c.md", "new_a.md", "new_b.md", "new_c.md"],
     )
-    files, warnings, discovered = discover_doc_files(
+    files, warnings, discovered, _ = discover_doc_files(
         tmp_path, max_files=3, sort_by="newest"
     )
     assert discovered == 6
@@ -60,7 +60,7 @@ def test_sort_by_newest_strictly_prefers_newer_mtimes(tmp_path):
         tmp_path,
         [f"f{i:02d}.md" for i in range(10)],  # f00 (oldest) … f09 (newest)
     )
-    files, _, discovered = discover_doc_files(
+    files, _, discovered, _ = discover_doc_files(
         tmp_path, max_files=3, sort_by="newest"
     )
     assert discovered == 10
@@ -80,10 +80,10 @@ def test_sort_by_walk_order_skips_mtime_sort(tmp_path):
         tmp_path,
         [f"f{i:02d}.md" for i in range(10)],
     )
-    files_walk, _, _ = discover_doc_files(
+    files_walk, _, _, _ = discover_doc_files(
         tmp_path, max_files=3, sort_by="walk_order"
     )
-    files_new, _, _ = discover_doc_files(
+    files_new, _, _, _ = discover_doc_files(
         tmp_path, max_files=3, sort_by="newest"
     )
     walk_min_mtime = min(os.stat(f).st_mtime for f in files_walk)
@@ -100,7 +100,7 @@ def test_sort_by_default_is_newest(tmp_path):
         tmp_path,
         ["old_a.md", "old_b.md", "new_a.md", "new_b.md"],
     )
-    files, _, _ = discover_doc_files(tmp_path, max_files=2)
+    files, _, _, _ = discover_doc_files(tmp_path, max_files=2)
     kept = sorted(f.name for f in files)
     assert kept == ["new_a.md", "new_b.md"]
 
@@ -110,8 +110,8 @@ def test_sort_by_has_no_effect_when_corpus_fits_under_cap(tmp_path):
     whatever the walker produced. Either walk-order or newest is fine —
     we just don't pay the sort cost."""
     _seed_files_with_mtimes(tmp_path, ["a.md", "b.md", "c.md"])
-    files_n, _, _ = discover_doc_files(tmp_path, max_files=100, sort_by="newest")
-    files_w, _, _ = discover_doc_files(tmp_path, max_files=100, sort_by="walk_order")
+    files_n, _, _, _ = discover_doc_files(tmp_path, max_files=100, sort_by="newest")
+    files_w, _, _, _ = discover_doc_files(tmp_path, max_files=100, sort_by="walk_order")
     assert {f.name for f in files_n} == {"a.md", "b.md", "c.md"}
     assert {f.name for f in files_w} == {"a.md", "b.md", "c.md"}
 

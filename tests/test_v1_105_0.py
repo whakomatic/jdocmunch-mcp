@@ -64,7 +64,7 @@ def test_discovery_skips_office_without_extra(tmp_path, monkeypatch):
     (tmp_path / "spec.docx").write_bytes(b"PK\x03\x04 not really a docx")
     (tmp_path / "readme.md").write_text("# hi\n", encoding="utf-8")
     skip_counts = {}
-    files, warnings, discovered = discover_doc_files(tmp_path, skip_counts=skip_counts)
+    files, warnings, discovered, _ = discover_doc_files(tmp_path, skip_counts=skip_counts)
     names = {f.name for f in files}
     assert names == {"readme.md"}
     assert skip_counts.get("office_extra_not_installed") == 1
@@ -73,7 +73,7 @@ def test_discovery_skips_office_without_extra(tmp_path, monkeypatch):
 def test_discovery_accepts_office_with_extra(tmp_path, monkeypatch):
     monkeypatch.setattr(office, "_AVAILABLE", True)
     (tmp_path / "spec.docx").write_bytes(b"PK\x03\x04")
-    files, warnings, discovered = discover_doc_files(tmp_path)
+    files, warnings, discovered, _ = discover_doc_files(tmp_path)
     assert {f.name for f in files} == {"spec.docx"}
 
 
@@ -83,7 +83,7 @@ def test_office_size_cap_applies(tmp_path, monkeypatch):
     monkeypatch.setattr(il, "OFFICE_MAX_FILE_SIZE", 4)
     (tmp_path / "big.pdf").write_bytes(b"12345678")
     skip_counts = {}
-    files, _, _ = discover_doc_files(tmp_path, skip_counts=skip_counts)
+    files, _, _, _ = discover_doc_files(tmp_path, skip_counts=skip_counts)
     assert files == []
     assert skip_counts.get("oversize") == 1
 
