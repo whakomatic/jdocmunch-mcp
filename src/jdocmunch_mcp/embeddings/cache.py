@@ -141,7 +141,16 @@ def identity(base_path: Optional[str], owner: str, name: str) -> Optional[dict]:
     Returning None for absent and a dict for present is the whole point;
     do not "simplify" this back to a falsy-on-both signature.
     """
-    path = _cache_path(base_path, owner, name)
+    return identity_at(_cache_path(base_path, owner, name))
+
+
+def identity_at(path) -> Optional[dict]:
+    """:func:`identity` for a sidecar already located by path.
+
+    ``DocIndex`` holds its sidecar's path, not the ``(base_path, owner, name)``
+    that produced it, so the query-time model check reads the header here.
+    """
+    path = Path(path)
     if not path.exists():
         return None
     try:

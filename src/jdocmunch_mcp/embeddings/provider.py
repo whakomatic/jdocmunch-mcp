@@ -938,6 +938,50 @@ def sidecar_identity(name: str) -> tuple[str, str, Optional[int]]:
     return (name, model, dim)
 
 
+# Header provider names that do not identify a model: the jdoc#75 safety net
+# writes this placeholder when it persists vectors it did not embed itself.
+_UNKNOWN_SIDECAR_PROVIDERS = frozenset({"__inline__"})
+
+
+def query_model_conflict(stored: Optional[dict]) -> Optional[dict]:
+    """Stored-vs-query model disagreement, or None when none is KNOWN.
+
+    jdoc#109 catches a WIDTH mismatch. Two models of equal width pass it, and
+    cosine across their unrelated vector spaces yields confident noise — e.g.
+    all-MiniLM-L6-v2 vectors queried with bge-small-en-v1.5, both 384 dims.
+
+    The active side goes through :func:`sidecar_identity`, the function the
+    writer stamps headers with, so a jdoc#126 alias still matches.
+
+    ⚠ Fails OPEN on anything unknown — no header, an ``__inline__``
+    placeholder, no active provider, or a dim only one side reports. Those
+    indexes behaved correctly before this check, and disabling their semantic
+    lane on a guess would trade a rare silent defect for a common loud one.
+    """
+    if not stored or stored.get("provider") in (None, *_UNKNOWN_SIDECAR_PROVIDERS):
+        return None
+    name = get_provider_name()
+    if not name:
+        return None
+    provider, model, dim = sidecar_identity(name)
+    stored_dim = stored.get("dim")
+    same = (
+        stored.get("provider") == provider
+        and stored.get("model") == model
+        and (dim is None or stored_dim is None or stored_dim == dim)
+    )
+    if same:
+        return None
+    conflict = {
+        "stored_model": {"provider": stored.get("provider"), "model": stored.get("model")},
+        "query_model": {"provider": provider, "model": model},
+    }
+    # jdoc#109's `query_dim` key, kept because this check now pre-empts that one.
+    if dim is not None:
+        conflict["query_dim"] = dim
+    return conflict
+
+
 def embed_sections(
     sections: list,
     *,

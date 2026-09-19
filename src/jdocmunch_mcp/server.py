@@ -2747,6 +2747,10 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         except Exception:
             pass
 
+        _embedding_stale = (
+            (result.get("_meta") or {}).get("embedding_stale")
+            if isinstance(result, dict) else None
+        )
         if isinstance(result, dict):
             result.setdefault("_meta", {})["powered_by"] = "jdocmunch-mcp by jgravelle · https://github.com/jgravelle/jdocmunch-mcp"
 
@@ -2797,6 +2801,13 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 result.setdefault("_meta", {})["budget"] = _b
         except Exception:
             pass
+
+        # Semantic search was skipped because the stored vectors were built by a
+        # different model. Re-attached AFTER meta_fields filtering for the same
+        # reason as the budget block: the default config would delete it, and
+        # the results would silently be lexical-only.
+        if _embedding_stale:
+            result.setdefault("_meta", {})["embedding_stale"] = _embedding_stale
 
         # Absence evidence, part two (#377 phase 3). Attached AFTER meta_fields
         # filtering for the same reason the budget block is: a token the

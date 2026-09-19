@@ -446,6 +446,29 @@ class DocIndex:
         sidecar = getattr(self, "_embeddings_sidecar", None)
         return bool(sidecar) and os.path.exists(sidecar)
 
+    def _embedding_model_conflict(self) -> Optional[dict]:
+        """Stored vectors vs the live query model, when both are known.
+
+        Checked once per loaded index. A non-None result means cosine would
+        compare two models' vector spaces, so the semantic lane is skipped and
+        ``search_sections`` reports it under ``_meta.embedding_stale``.
+        """
+        cached = getattr(self, "_model_conflict_cache", "unset")
+        if cached != "unset":
+            return cached
+        conflict = None
+        sidecar = getattr(self, "_embeddings_sidecar", None)
+        if sidecar:
+            from ..embeddings import cache as _emb_cache
+            from ..embeddings import provider as _emb_provider
+            conflict = _emb_provider.query_model_conflict(_emb_cache.identity_at(sidecar))
+        self._model_conflict_cache = conflict
+        return conflict
+
+    def _semantic_available(self) -> bool:
+        """Embeddings exist AND were built by the model queries are embedded with."""
+        return self._has_embeddings() and not self._embedding_model_conflict()
+
     def _rehydrate_embeddings(self) -> None:
         """Attach sidecar vectors to section dicts in-place, at most once (jdoc#75).
 
@@ -528,7 +551,7 @@ class DocIndex:
 
         Returns sections sorted by relevance, with content and embedding stripped.
         """
-        has_emb = self._has_embeddings()
+        has_emb = self._semantic_available()
         if semantic_only:
             return self._semantic_search(query, doc_path, max_results, path_glob) if has_emb else []
 

@@ -200,7 +200,9 @@ def search_sections(
     if not index:
         return {"error": f"Repo not found: {repo}"}
 
-    has_emb = index._has_embeddings()
+    # Same gate DocIndex.search applies, so the reported mode matches the one run.
+    model_conflict = index._embedding_model_conflict()
+    has_emb = index._has_embeddings() and not model_conflict
 
     # v1.23.0: when the caller leaves semantic_weight unset, ask the tuner
     # for a per-repo learned override. Explicit caller values always win.
@@ -405,6 +407,17 @@ def search_sections(
     if _width:
         meta["embedding_stale"] = {
             **_width,
+            "semantic_disabled": True,
+            "reason": "stored embeddings were built by a different model",
+            "fix": "re-index with --rebuild (or index_local(incremental=False)) "
+                   "to re-embed the corpus under the active model",
+        }
+    # Equal-width models pass the check above and cosine across them is noise,
+    # so the semantic lane was never run for this index.
+    if model_conflict:
+        meta["embedding_stale"] = {
+            **model_conflict,
+            "stored_dims": dict(sorted(index.embedding_dims().items())),
             "semantic_disabled": True,
             "reason": "stored embeddings were built by a different model",
             "fix": "re-index with --rebuild (or index_local(incremental=False)) "
